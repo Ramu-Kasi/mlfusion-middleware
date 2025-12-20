@@ -5,10 +5,15 @@ import requests
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
+# --- CORRECTED LOGGING CONFIG ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)] # Forces output to Render logs)
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+# This will show up in Render logs immediately upon deploy
+logging.info("ML Fusion Bridge: Logger initialized and active.")
 
 # --- TELEGRAM CONFIG ---
 # Replace with your actual Token and Chat ID
