@@ -1,17 +1,12 @@
-import os # Add this at the top
-
-if __name__ == '__main__':
-    # This gets the PORT variable from Render, or defaults to 5000 if not found
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
-    
-from flask import Flask, request, jsonify
+import os
 import logging
 import sys
+from flask import Flask, request, jsonify
 
+# 1. Initialize the app first
 app = Flask(__name__)
 
-# Configure logging to output to stdout (Standard Output)
+# 2. Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -27,19 +22,27 @@ def mlfusion():
         logging.warning("Received request with no message key")
         return jsonify({"status": "ERROR", "reason": "No message provided"}), 400
 
+    # Clean the message and get the strike if provided
     message = data.get("message", "").replace(" ", "").upper()
+    strike = data.get("strike", "N/A")
 
     if "BUY" in message:
-        logging.info("PROCESS SUCCESS: The message is BUY")
-        return jsonify({"status": "BUY"})
+        logging.info(f"PROCESS SUCCESS: BUY signal at Strike: {strike}")
+        return jsonify({"status": "BUY", "strike": strike})
     
     elif "SELL" in message:
-        logging.info("PROCESS SUCCESS: The message is SELL")
-        return jsonify({"status": "SELL"})
+        logging.info(f"PROCESS SUCCESS: SELL signal at Strike: {strike}")
+        return jsonify({"status": "SELL", "strike": strike})
     
     else:
         logging.info(f"PROCESS UNKNOWN: Received {message}")
         return jsonify({"status": "UNKNOWN"})
 
+# 3. The Run logic must be at the very bottom
 if __name__ == '__main__':
-    app.run(debug=True)
+    # This specifically looks for your Render Environment Variable 'PORT'
+    # If not found, it defaults to 5000
+    port = int(os.environ.get("PORT", 5000))
+    
+    # host='0.0.0.0' is required for Render to connect to the internet
+    app.run(host='0.0.0.0', port=port)
