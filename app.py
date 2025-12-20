@@ -29,7 +29,7 @@ def mlfusion():
 
     # Logic: BUY/STRONG_BUY -> Buy (B) | SELL/STRONG_SELL -> Sell (S)
     trans_type = "B" if "BUY" in signal else "S"
-    qty = "15" if "BANK" in ticker.upper() else "25"
+    qty = "1" if "BANK" in ticker.upper() else "1"
     itm_strike = get_1_itm_ce(price, ticker)
 
     # Prepare the JSON specifically for your unique Dhan link
