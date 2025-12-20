@@ -13,7 +13,6 @@ DHAN_WEBHOOK_URL = "https://tv-webhook.dhan.co/tv/alert/5fa02e0ded734d27888fbef6
 def get_1_itm_ce(price, ticker):
     price = float(price)
     step = 100 if "BANK" in ticker.upper() else 50
-    # Round to nearest ATM then subtract 1 step for ITM
     atm_strike = int(round(price / step) * step)
     return atm_strike - step 
 
@@ -23,16 +22,15 @@ def mlfusion():
     if not data:
         return jsonify({"status": "ERROR", "reason": "No data"}), 400
 
+    # For testing BTCUSD, ticker will be "BTCUSD"
     signal = data.get("message", "").upper() 
     ticker = data.get("ticker", "BANKNIFTY")
     price = data.get("price", 0)
 
-    # Logic: BUY/STRONG_BUY -> Buy (B) | SELL/STRONG_SELL -> Sell (S)
     trans_type = "B" if "BUY" in signal else "S"
-    qty = "1" if "BANK" in ticker.upper() else "1"
+    qty = "15" if "BANK" in ticker.upper() else "25"
     itm_strike = get_1_itm_ce(price, ticker)
 
-    # Prepare the JSON specifically for your unique Dhan link
     dhan_order = {
         "secret": "OvWi0",
         "alertType": "multi_leg_order",
@@ -41,7 +39,7 @@ def mlfusion():
             "orderType": "MKT",          
             "quantity": qty,             
             "exchange": "NSE",           
-            "symbol": ticker,
+            "symbol": ticker, # This will be BTCUSD during your test
             "instrument": "OPT",
             "productType": "M",          
             "sort_order": "1",
@@ -52,22 +50,24 @@ def mlfusion():
         }]
     }
 
-    # SENDING TO YOUR UNIQUE DHAN LINK
     try:
-        logging.info(f"Sending {signal} to Dhan: {itm_strike} CE")
+        # LOGGING: See exactly what we are sending
+        logging.info(f"TESTING WITH {ticker}: Sending payload to Dhan...")
+        
         response = requests.post(DHAN_WEBHOOK_URL, json=dhan_order, timeout=10)
         
-        # Log Dhan's actual response so we can troubleshoot
-        logging.info(f"DHAN STATUS: {response.status_code} | RESPONSE: {response.text}")
+        # LOGGING: See Dhan's rejection message
+        logging.info(f"DHAN RESPONSE CODE: {response.status_code}")
+        logging.info(f"DHAN RESPONSE TEXT: {response.text}")
         
         return jsonify({
-            "status": "PROCESSED",
-            "dhan_response": response.text
+            "status": "TEST_COMPLETE",
+            "dhan_received": response.text
         }), 200
 
     except Exception as e:
-        logging.error(f"CRITICAL ERROR: {str(e)}")
-        return jsonify({"status": "SERVER_ERROR", "error": str(e)}), 500
+        logging.error(f"DEPLOYMENT ERROR: {str(e)}")
+        return jsonify({"status": "FAILED", "error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
