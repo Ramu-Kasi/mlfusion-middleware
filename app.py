@@ -13,10 +13,9 @@ stream_handler.setFormatter(logging.Formatter(
     '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 ))
 
-# Attach to both Root and Flask loggers
+# Simplified Version to avoid duplicates
 logging.getLogger().addHandler(stream_handler)
-app.logger.addHandler(stream_handler)
-app.logger.setLevel(logging.INFO)
+logging.getLogger().setLevel(logging.INFO)
 
 app.logger.info(">>> ML FUSION BRIDGE: LOGGER INITIALIZED <<<")
 
