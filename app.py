@@ -3,33 +3,41 @@ import logging
 import sys
 from flask import Flask, request, jsonify
 
+# 1. Initialize the app FIRST to avoid NameError
 app = Flask(__name__)
 
-# Standard logging
+# Configure logging for Render logs
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
-def get_atm_strike(price, step=100):
-    """Rounds market price to nearest strike (100 for BankNifty, 50 for Nifty)"""
-    return int(round(float(price) / step) * step)
+def get_atm_strike(price, ticker):
+    """Calculates ATM strike based on ticker type"""
+    price = float(price)
+    if "BANKNIFTY" in ticker:
+        step = 100
+    elif "NIFTY" in ticker:
+        step = 50
+    elif "BTC" in ticker:
+        step = 100  # Example step for BTC options
+    else:
+        step = 10   # Default for other stocks
+    return int(round(price / step) * step)
 
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
     data = request.get_json()
-    
-    # Get values from TradingView JSON
+    if not data:
+        return jsonify({"status": "ERROR", "reason": "No data"}), 400
+
+    # Get dynamic data from TradingView alert message
     message = data.get("message", "").upper()
-    raw_price = data.get("price", 0) # This picks up {{close}}
-    ticker = data.get("ticker", "BANKNIFTY")
+    price = data.get("price", 0)
+    ticker = data.get("ticker", "BTCUSD")
 
-    # Determine strike step (BankNifty=100, Nifty=50)
-    step = 50 if "NIFTY" in ticker and "BANK" not in ticker else 100
+    # Calculate the ATM strike using the rounding function
+    atm_strike = get_atm_strike(price, ticker)
     
-    # Calculate the ATM Strike
-    atm_strike = get_atm_strike(raw_price, step)
+    logging.info(f"RECEIVED: {ticker} {message} at {price} | ATM STRIKE: {atm_strike}")
     
-    logging.info(f"Signal: {message} | Price: {raw_price} | ATM Strike: {atm_strike}")
-
-    # Return the clean strike to confirm it worked
     return jsonify({
         "status": "SUCCESS",
         "signal": message,
@@ -37,5 +45,6 @@ def mlfusion():
     }), 200
 
 if __name__ == '__main__':
+    # Use 'PORT' from Render environment or default to 5000
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
