@@ -6,18 +6,25 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# --- 1. CLOUD LOGGING CONFIGURATION ---
-# This ensures logs appear in Render when running via python app.py
-stream_handler = logging.StreamHandler(sys.stdout)
-stream_handler.setFormatter(logging.Formatter(
-    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-))
+# 1. Create a specialized handler for Render's console
+class FlushHandler(logging.StreamHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()  # Force the line out of the buffer immediately
 
-# Simplified Version to avoid duplicates
-logging.getLogger().addHandler(stream_handler)
-logging.getLogger().setLevel(logging.INFO)
+# 2. Configure the logger using this new handler
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
-app.logger.info(">>> ML FUSION BRIDGE: LOGGER INITIALIZED <<<")
+# Clear any old handlers to prevent the "double print" issue
+if logger.hasHandlers():
+    logger.handlers.clear()
+
+handler = FlushHandler(sys.stdout)
+handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(handler)
+
+logger.info(">>> ML FUSION BRIDGE: INSTANT LOGGING ACTIVE <<<")
 
 # --- CONFIGURATION ---
 TELEGRAM_TOKEN = "8272512971:AAHCVmQj_0Q30b0PgfSwP43WpMSMb-NJuDo"
