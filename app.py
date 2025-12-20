@@ -1,20 +1,38 @@
 from flask import Flask, request, jsonify
+import logging
+import sys
 
 app = Flask(__name__)
 
-@app.route("/mlfusion", methods=["POST"])
+# Configure logging to output to stdout (Standard Output)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
+)
+
+@app.route('/mlfusion', methods=['POST'])
 def mlfusion():
     data = request.get_json()
-    message = data.get("message", "")
-    print(f"Received message: {message}")  # Check logs
+    
+    # Check if 'message' exists to prevent errors
+    if not data or 'message' not in data:
+        logging.warning("Received request with no message key")
+        return jsonify({"status": "ERROR", "reason": "No message provided"}), 400
 
-    # Normalize message to handle case and spaces
-    if message.strip().upper() == "BUY":
-        return jsonify({"status": "BUY"}), 200
-    elif message.strip().upper() == "SELL":
-        return jsonify({"status": "SELL"}), 200
+    message = data.get("message", "").replace(" ", "").upper()
+
+    if "BUY" in message:
+        logging.info("PROCESS SUCCESS: The message is BUY")
+        return jsonify({"status": "BUY"})
+    
+    elif "SELL" in message:
+        logging.info("PROCESS SUCCESS: The message is SELL")
+        return jsonify({"status": "SELL"})
+    
     else:
-        return jsonify({"status": "UNKNOWN"}), 200
+        logging.info(f"PROCESS UNKNOWN: Received {message}")
+        return jsonify({"status": "UNKNOWN"})
 
-if __name__ == "__main__":
-   app.run(host="0.0.0.0", port=5000)
+if __name__ == '__main__':
+    app.run(debug=True)
