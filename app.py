@@ -1,3 +1,10 @@
+import os # Add this at the top
+
+if __name__ == '__main__':
+    # This gets the PORT variable from Render, or defaults to 5000 if not found
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
+    
 from flask import Flask, request, jsonify
 import logging
 import sys
