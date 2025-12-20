@@ -5,7 +5,10 @@ import requests
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)] # Forces output to Render logs)
 
 # --- TELEGRAM CONFIG ---
 # Replace with your actual Token and Chat ID
