@@ -4,39 +4,15 @@ import sys
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
-
-# Configure logging for Render
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
-def get_itm_strike(price, ticker, signal):
-    """Calculates 1-Strike ITM based on signal and ticker."""
+def get_1_itm_ce(price, ticker):
+    """Always calculates 1-ITM CE (Call Option)."""
     price = float(price)
-    signal = signal.upper()
-    
-    # Define strike intervals (steps)
-    if "BANKNIFTY" in ticker:
-        step = 100
-    elif "NIFTY" in ticker:
-        step = 50
-    elif "BTC" in ticker:
-        step = 100
-    else:
-        step = 10
-
-    # 1. Find the ATM strike first
+    # BankNifty step = 100, Nifty step = 50
+    step = 100 if "BANK" in ticker.upper() else 50
     atm_strike = int(round(price / step) * step)
-
-    # 2. Shift for 1 ITM
-    # If BUY (Call), ITM is one step LOWER
-    if "BUY" in signal:
-        itm_strike = atm_strike - step
-    # If SELL (Put), ITM is one step HIGHER
-    elif "SELL" in signal:
-        itm_strike = atm_strike + step
-    else:
-        itm_strike = atm_strike
-        
-    return itm_strike
+    return atm_strike - step  # 1-ITM CE is one step below ATM
 
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
@@ -44,20 +20,43 @@ def mlfusion():
     if not data:
         return jsonify({"status": "ERROR", "reason": "No data"}), 400
 
-    message = data.get("message", "").upper()
+    # These values come from your TradingView alert message
+    signal = data.get("message", "").upper() 
+    ticker = data.get("ticker", "BANKNIFTY")
     price = data.get("price", 0)
-    ticker = data.get("ticker", "UNKNOWN")
 
-    # Calculate 1 ITM Strike
-    target_strike = get_itm_strike(price, ticker, message)
+    # LOGIC: If the message contains "BUY", we go Long (B)
+    # If it contains "SELL", we Exit (S)
+    trans_type = "B" if "BUY" in signal else "S"
     
-    logging.info(f"SIGNAL: {message} | PRICE: {price} | 1-ITM STRIKE: {target_strike}")
+    # 1 Lot Quantity (BankNifty=15, Nifty=25)
+    qty = "15" if "BANK" in ticker.upper() else "25"
+    itm_strike = get_1_itm_ce(price, ticker)
+
+    # FINAL DHAN JSON with all required parameters
+    dhan_order = {
+        "secret": "OvWi0",
+        "alertType": "multi_leg_order",
+        "order_legs": [{
+            "transactionType": trans_type,
+            "orderType": "MKT",          # Market Order
+            "quantity": qty,             # 1 Lot
+            "exchange": "NSE",           # NSE F&O
+            "symbol": ticker,
+            "instrument": "OPT",
+            "productType": "M",          # Margin
+            "sort_order": "1",
+            "price": "0",                
+            "option_type": "CE",         # Always trading the CE
+            "strike_price": str(float(itm_strike)),
+            "expiry_date": "2025-12-30"  # Update this to current expiry
+        }]
+    }
+
+    logging.info(f"SIGNAL: {signal} | ACTION: {trans_type} | STRIKE: {itm_strike} CE")
     
-    return jsonify({
-        "status": "SUCCESS",
-        "signal": message,
-        "itm_strike": target_strike
-    }), 200
+    # Ready to send to Dhan
+    return jsonify({"status": "SUCCESS", "dhan_json": dhan_order}), 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
