@@ -6,16 +6,17 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# 1. Specialized handler for Render's console
+# 1. Create a specialized handler for Render's console
 class FlushHandler(logging.StreamHandler):
     def emit(self, record):
         super().emit(record)
-        self.flush()
+        self.flush()  # Force the line out of the buffer immediately
 
-# 2. Configure the logger
+# 2. Configure the logger using this new handler
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+# Clear any old handlers to prevent the "double print" issue
 if logger.hasHandlers():
     logger.handlers.clear()
 
@@ -35,47 +36,61 @@ EXPIRY_DATE = "2025-12-30"
 # --- GLOBAL TRACKERS ---
 last_signal = "None"
 last_strike = "None"
+last_status = "Waiting for first signal..."
 trade_count = 0
-last_status = "Waiting for signal..."
 
 def get_itm_strike(price, ticker, opt_type):
-    if ticker == "NIFTY":
-        base = 50
-    elif ticker == "BANKNIFTY":
-        base = 100
-    else:
-        base = 100
-    
-    # Keeping your original logic
-    atm_strike = round(float(price) / base) * base
-    return (atm_strike - base) if opt_type == "CE" else (atm_strike + base)
+    try:
+        price = float(price)
+        step = 100 if "BANK" in ticker.upper() else 50
+        atm_strike = int(round(price / step) * step)
+        return (atm_strike - step) if opt_type == "CE" else (atm_strike + step)
+    except Exception as e:
+        app.logger.error(f"Strike Calculation Error: {e}")
+        return 0
 
-# --- MANDATORY: WAKEUP & SUMMARY ROUTE ---
-# This fixes the "Not Found" error when you visit the main URL
-@app.route('/')
-def home():
-    global last_signal, last_strike, trade_count, last_status
-    return f"STATUS: {last_status} | LAST SIGNAL: {last_signal} | TRADES: {trade_count}"
+def send_telegram(message):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        app.logger.error(f"Telegram Error: {e}")
 
-# --- WEBHOOK ENDPOINT ---
+@app.route('/', methods=['GET'])
+def health_check():
+    return f"""
+    <html>
+        <body style="font-family: sans-serif; text-align: center; padding-top: 50px; background-color: #f4f4f9;">
+            <div style="display: inline-block; padding: 20px; border: 1px solid #ccc; border-radius: 10px; background: white;">
+                <h1 style="color: #2c3e50;">🚀 ML Fusion Bridge is LIVE</h1>
+                <p><strong>Last Signal:</strong> {last_signal}</p>
+                <p><strong>Last ITM Strike:</strong> {last_strike}</p>
+                <p><strong>Total Flips Today:</strong> {trade_count}</p>
+                <p><strong>Dhan Status:</strong> {last_status}</p>
+                <hr>
+                <p style="color: gray; font-size: 0.8em;">Expiry Config: {EXPIRY_DATE}</p>
+            </div>
+        </body>
+    </html>
+    """, 200
+
 @app.route('/mlfusion', methods=['POST'])
-def webhook():
-    global last_signal, last_strike, trade_count, last_status
+def mlfusion():
+    global last_signal, last_strike, last_status, trade_count
     
     data = request.get_json()
     app.logger.info(f"--- WEBHOOK RECEIVED: {data} ---")
-
+    
     if not data:
-        return jsonify({"error": "No data received"}), 400
+        app.logger.error("No JSON data received")
+        return jsonify({"status": "error"}), 400
 
     signal = data.get("message", "").upper() 
     ticker = data.get("ticker", "BANKNIFTY")
-    price = data.get("price", "0") # Kept as string per your requirement
+    price = data.get("price", 0)
 
-    if signal not in ["BUY", "SELL"]:
-        return jsonify({"status": "Ignored"}), 200
-
-    new_opt_type = "CE" if signal == "BUY" else "PE"
+    new_opt_type = "CE" if "BUY" in signal else "PE"
     itm_strike = get_itm_strike(price, ticker, new_opt_type)
 
     last_signal = f"{signal} on {ticker}"
@@ -103,11 +118,13 @@ def webhook():
     try:
         response = requests.post(DHAN_WEBHOOK_URL, json=dhan_payload, timeout=15)
         last_status = f"Success ({response.status_code})"
+        app.logger.info(f"Dhan Action: {signal} | Strike: {itm_strike} | Resp: {response.status_code}")
         return jsonify({"status": "SUCCESS"}), 200
     except Exception as e:
         last_status = f"Error: {str(e)}"
+        app.logger.error(f"Post Error: {e}")
         return jsonify({"status": "FAILED"}), 500
 
-if __name__ == "__main__":
-    # Keeping your original port logic
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
