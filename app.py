@@ -6,13 +6,13 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# 1. Create a specialized handler for Render's console
+# 1. Specialized handler for Render's console
 class FlushHandler(logging.StreamHandler):
     def emit(self, record):
         super().emit(record)
-        self.flush()  # Force the line out of the buffer immediately
+        self.flush()
 
-# 2. Configure the logger using this new handler
+# 2. Configure the logger
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -46,11 +46,12 @@ def get_itm_strike(price, ticker, opt_type):
     else:
         base = 100
     
-    # Keeping your original logic: math on price works if price is numeric-string
+    # Keeping your original logic
     atm_strike = round(float(price) / base) * base
     return (atm_strike - base) if opt_type == "CE" else (atm_strike + base)
 
-# --- ADDED: WAKEUP & SUMMARY ROUTE ---
+# --- MANDATORY: WAKEUP & SUMMARY ROUTE ---
+# This fixes the "Not Found" error when you visit the main URL
 @app.route('/')
 def home():
     global last_signal, last_strike, trade_count, last_status
@@ -69,7 +70,7 @@ def webhook():
 
     signal = data.get("message", "").upper() 
     ticker = data.get("ticker", "BANKNIFTY")
-    price = data.get("price", "0") # Kept as string
+    price = data.get("price", "0") # Kept as string per your requirement
 
     if signal not in ["BUY", "SELL"]:
         return jsonify({"status": "Ignored"}), 200
@@ -108,4 +109,5 @@ def webhook():
         return jsonify({"status": "FAILED"}), 500
 
 if __name__ == "__main__":
+    # Keeping your original port logic
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
