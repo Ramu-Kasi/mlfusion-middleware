@@ -26,12 +26,15 @@ logger.addHandler(handler)
 
 logger.info(">>> ML FUSION BRIDGE: INSTANT LOGGING ACTIVE <<<")
 
+# This looks for the .env file in the current directory
+load_dotenv()
+
 # --- CONFIGURATION ---
-TELEGRAM_TOKEN = "8272512971:AAHCVmQj_0Q30b0PgfSwP43WpMSMb-NJuDo"
-TELEGRAM_CHAT_ID = "1420064473" 
-DHAN_WEBHOOK_URL = "https://tv-webhook.dhan.co/tv/alert/5fa02e0ded734d27888fbef62ee1cbc2/FOOE21573Z"
-DHAN_SECRET = "OvWi0"
-EXPIRY_DATE = "2025-12-30" 
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+DHAN_WEBHOOK_URL = os.getenv("DHAN_WEBHOOK_URL")
+DHAN_SECRET = os.getenv("DHAN_SECRET")
+EXPIRY_DATE = os.getenv("EXPIRY_DATE")
 
 # --- GLOBAL TRACKERS ---
 last_signal = "None"
