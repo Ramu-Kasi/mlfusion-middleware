@@ -46,8 +46,10 @@ def load_scrip_master():
             
             SCRIP_MASTER_DATA = filtered_df
             log_now(f"SUCCESS: Cached {len(SCRIP_MASTER_DATA)} Bank Nifty contracts.")
+            return True
     except Exception as e:
         log_now(f"CACHE ERROR: {e}")
+    return False
 
 # Initial Load on Startup
 load_scrip_master()
@@ -58,16 +60,18 @@ scheduler.add_job(func=load_scrip_master, trigger="interval", hours=24)
 scheduler.start()
 
 def get_atm_id(price, signal):
-    """Instant lookup from cached memory"""
+    """Instant lookup with Lazy Loading fallback"""
+    global SCRIP_MASTER_DATA
     try:
-        # SAFETY CHECK: Prevent 'Strike None' error
         if price is None or str(price).strip() == "" or str(price).lower() == "none":
             log_now("INPUT ERROR: Price received is None or empty.")
             return None, None, None
             
+        # LAZY LOAD: If cache is empty, try loading it now instead of failing
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty:
-            log_now("CACHE ERROR: Data not loaded.")
-            return None, None, None
+            log_now("CACHE EMPTY: Attempting emergency lazy load...")
+            if not load_scrip_master():
+                return None, None, None
         
         strike = round(float(price) / 100) * 100
         opt_type = "CE" if "BUY" in signal.upper() else "PE"
@@ -86,7 +90,6 @@ def get_atm_id(price, signal):
         ].copy()
         
         if not match.empty:
-            # DYNAMIC SORT: Always pick nearest expiry
             if exp_col:
                 match = match.dropna(subset=[exp_col]).sort_values(by=exp_col, ascending=True)
             
