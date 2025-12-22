@@ -47,10 +47,9 @@ def load_scrip_master():
 
             SCRIP_MASTER_DATA = df[mask].copy()
             
-            # VALIDATION: Convert expiry dates to datetime objects for sorting
+            # NEAREST EXPIRY VALIDATION: Convert dates for sorting
             if exp_col:
                 SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
-                # Remove any rows where expiry date failed to parse
                 SCRIP_MASTER_DATA = SCRIP_MASTER_DATA.dropna(subset=[exp_col])
             
             log_now(f"BOOT: Success! {len(SCRIP_MASTER_DATA)} Bank Nifty contracts loaded.")
@@ -64,10 +63,10 @@ def load_scrip_master():
 load_scrip_master()
 
 def get_atm_id(price, signal):
-    """Retrieves the Security ID for the NEAREST EXPIRY Bank Nifty contract"""
+    """Retrieves the Security ID for the NEAREST EXPIRY Bank Nifty contract with Qty 35"""
     try:
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: 
-            return None, None, 15
+            return None, None, 35
         
         strike = round(float(price) / 100) * 100
         opt_type = "CE" if "BUY" in signal.upper() else "PE"
@@ -87,11 +86,8 @@ def get_atm_id(price, signal):
         
         if not match.empty:
             # --- NEAREST EXPIRY VALIDATION ---
-            # 1. Filter out dates that have already passed
             today = pd.Timestamp(datetime.now().date())
             match = match[match[exp_col] >= today]
-            
-            # 2. Sort by date (ascending) to get the closest upcoming expiry
             match = match.sort_values(by=exp_col, ascending=True)
             
             if not match.empty:
@@ -99,12 +95,12 @@ def get_atm_id(price, signal):
                 final_id = str(int(row[id_col]))
                 expiry_str = row[exp_col].strftime('%Y-%m-%d')
                 log_now(f"MATCH FOUND: {row.get('SEM_TRADING_SYMBOL', 'BN')} | Expiry: {expiry_str} -> ID {final_id}")
-                return final_id, strike, 15 
+                return final_id, strike, 35 
             
-        return None, strike, 15
+        return None, strike, 35
     except Exception as e:
         log_now(f"LOOKUP ERROR: {e}")
-        return None, None, 15
+        return None, None, 35
 
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
@@ -120,7 +116,7 @@ def mlfusion():
             log_now(f"FAILED: No Bank Nifty contract found for strike {strike}")
             return jsonify({"status": "not_found"}), 404
 
-        # Fixed syntax error (unterminated f-string) from previous step
+        # Fixed line 115 from previous error
         log_now(f"EXECUTE: Sending Order for SecurityId {sec_id} with Qty {qty}")
         return jsonify({"status": "success", "security_id": sec_id, "quantity": qty, "strike": strike})
 
@@ -128,8 +124,7 @@ def mlfusion():
         log_now(f"HANDLER ERROR: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# --- FIX FOR RENDER DEPLOYMENT (Keeps app running) ---
+# --- FIX FOR RENDER DEPLOYMENT ---
 if __name__ == '__main__':
-    # Listens on the port assigned by Render
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
