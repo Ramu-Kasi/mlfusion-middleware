@@ -26,7 +26,6 @@ def load_scrip_master():
     log_now("BOOT: Loading CSV and applying STRICT Bank Nifty filters...")
     try:
         df = pd.read_csv(SCRIP_URL, low_memory=False)
-        
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c.upper()), None)
         sym_col = next((c for c in df.columns if 'SYMBOL' in c.upper()), None)
         exch_col = next((c for c in df.columns if 'EXCHANGE' in c.upper()), None)
@@ -38,43 +37,60 @@ def load_scrip_master():
                 (df[sym_col].str.contains('BANKNIFTY', case=False, na=False)) &
                 (~df[sym_col].str.contains('BANKEX', case=False, na=False))
             )
-            
             if exch_col:
                 mask = mask & (df[exch_col].str.contains('NSE', case=False, na=False))
 
             SCRIP_MASTER_DATA = df[mask].copy()
-            
             if exp_col:
                 SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
                 SCRIP_MASTER_DATA = SCRIP_MASTER_DATA.dropna(subset=[exp_col])
-            
             log_now(f"BOOT: Success! {len(SCRIP_MASTER_DATA)} Bank Nifty contracts loaded.")
-        else:
-            log_now("BOOT ERROR: Essential columns missing.")
-            
     except Exception as e:
         log_now(f"CRITICAL BOOT ERROR: {e}")
 
-# Initial load
 load_scrip_master()
 
+def close_opposite_position(type_to_close):
+    """Rule-based closer: Squares off existing BN options of the opposite type"""
+    try:
+        positions = dhan.get_positions()
+        # If no positions exist, positions['data'] is usually an empty list or None
+        if positions.get('status') == 'success' and positions.get('data'):
+            for pos in positions['data']:
+                symbol = pos.get('tradingSymbol', '')
+                qty = int(pos.get('netQty', 0))
+                
+                # Check for active Bank Nifty position of the opposite type
+                if "BANKNIFTY" in symbol and symbol.endswith(type_to_close) and qty != 0:
+                    log_now(f"RULE: Closing {symbol} (Qty: {qty}) before reversal.")
+                    
+                    dhan.place_order(
+                        tag='MLFusion_Exit',
+                        transaction_type=dhan.SELL if qty > 0 else dhan.BUY,
+                        exchange_segment=dhan.NSE_FNO,
+                        product_type=dhan.INTRA,
+                        order_type=dhan.MARKET,
+                        validity=dhan.DAY,
+                        security_id=pos['securityId'],
+                        quantity=abs(qty),
+                        price=0
+                    )
+        return True
+    except Exception as e:
+        log_now(f"REVERSAL ERROR: {e}")
+        return False
+
 def get_itm_id(price, signal):
-    """Retrieves the Security ID for 1-Step ITM Bank Nifty contract (Qty 35)"""
+    """Finds 1-Step ITM Bank Nifty ID for the nearest expiry"""
     try:
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: 
-            return None, None, 35
+            return None, None
         
-        # Calculate base ATM strike
         atm_strike = round(float(price) / 100) * 100
         opt_type = "CE" if "BUY" in signal.upper() else "PE"
 
-        # --- ITM LOGIC ---
-        # 1-Step ITM for CE: Subtract 100 points
-        # 1-Step ITM for PE: Add 100 points
-        if opt_type == "CE":
-            strike = atm_strike - 100
-        else:
-            strike = atm_strike + 100
+        # 1-Step ITM Logic: CE (Atm-100), PE (Atm+100)
+        strike = (atm_strike - 100) if opt_type == "CE" else (atm_strike + 100)
         
         cols = SCRIP_MASTER_DATA.columns
         strike_col = next((c for c in cols if 'STRIKE' in c.upper()), None)
@@ -89,21 +105,18 @@ def get_itm_id(price, signal):
         ].copy()
         
         if not match.empty:
-            # Nearest Expiry Validation
             today = pd.Timestamp(datetime.now().date())
             match = match[match[exp_col] >= today]
             match = match.sort_values(by=exp_col, ascending=True)
             
             if not match.empty:
                 row = match.iloc[0]
-                final_id = str(int(row[id_col]))
-                log_now(f"ITM MATCH: {row.get('SEM_TRADING_SYMBOL', 'BN')} | Strike: {strike} -> ID {final_id}")
-                return final_id, strike, 35 
+                return str(int(row[id_col])), strike
             
-        return None, strike, 35
+        return None, strike
     except Exception as e:
         log_now(f"LOOKUP ERROR: {e}")
-        return None, None, 35
+        return None, None
 
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
@@ -111,30 +124,40 @@ def mlfusion():
     try:
         data = request.get_json(force=True, silent=True)
         if not data:
-            return jsonify({"status": "error", "message": "No JSON payload"}), 400
+            return jsonify({"status": "error", "message": "No JSON"}), 400
 
-        # Now calls the ITM function
-        sec_id, strike, qty = get_itm_id(data.get("price"), data.get("message", ""))
+        signal = data.get("message", "").upper()
+        
+        # Reversal Logic Definition
+        if "BUY" in signal:
+            current_type, opposite_type = "CE", "PE"
+        else:
+            current_type, opposite_type = "PE", "CE"
+
+        # 1. Attempt to close opposite (won't fail if none exist)
+        close_opposite_position(opposite_type)
+
+        # 2. Fetch ITM Strike
+        sec_id, strike = get_itm_id(data.get("price"), signal)
         
         if not sec_id:
+            log_now(f"FAILED: No ITM {current_type} found for strike {strike}")
             return jsonify({"status": "not_found"}), 404
 
-        transaction_type = dhan.BUY if "BUY" in data.get("message", "").upper() else dhan.SELL
-        
-        # Placing the order with ITM Security ID
+        # 3. Buy 1 lot (35 Qty)
         order = dhan.place_order(
-            tag='MLFusion_BN_ITM',
-            transaction_type=transaction_type,
+            tag='MLFusion_BN',
+            transaction_type=dhan.BUY, 
             exchange_segment=dhan.NSE_FNO,
             product_type=dhan.INTRA,
             order_type=dhan.MARKET,
             validity=dhan.DAY,
             security_id=sec_id,
-            quantity=qty,
+            quantity=35, 
             price=0
         )
 
-        log_now(f"EXECUTE: ITM Order Sent. Strike: {strike} | Response: {order}")
+        log_now(f"EXECUTE: Opened {current_type} ITM {strike} | Response: {order}")
         return jsonify({"status": "success", "order_data": order})
 
     except Exception as e:
@@ -142,6 +165,5 @@ def mlfusion():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
-    # Fix for Render deployment
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
