@@ -20,7 +20,7 @@ def log_now(msg):
     sys.stderr.flush()
 
 def load_scrip_master():
-    """Robust CSV loader that filters for Bank Nifty Index Options"""
+    """Robust CSV loader that strictly filters for Bank Nifty Index Options"""
     global SCRIP_MASTER_DATA
     log_now("BOOT: Loading CSV...")
     try:
@@ -29,15 +29,18 @@ def load_scrip_master():
         # Identify columns using keywords
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c.upper()), None)
         und_col = next((c for c in df.columns if 'UNDERLYING_SECURITY_ID' in c.upper()), None)
+        sym_col = next((c for c in df.columns if 'SYMBOL' in c.upper()), None)
         
         if inst_col and und_col:
-            # Bank Nifty Underlying ID is 25
+            # FIX: Strict filter for OPTIDX (Index Options) and Underlying 25 (Bank Nifty)
+            # Added a second check for symbol to ensure no stock options like PAGEIND leak through
             SCRIP_MASTER_DATA = df[
                 (df[inst_col].str.contains('OPTIDX', na=False)) & 
-                (df[und_col] == 25)
+                (df[und_col] == 25) &
+                (df[sym_col].str.contains('BANKNIFTY', na=False) if sym_col else True)
             ].copy()
             
-            # DYNAMIC DATE CONVERSION: Convert expiry to datetime for proper sorting
+            # DYNAMIC DATE CONVERSION
             exp_col = next((c for c in df.columns if 'EXPIRY_DATE' in c.upper()), None)
             if exp_col:
                 SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
@@ -77,23 +80,22 @@ def get_atm_id(price, signal):
         ].copy()
         
         if not match.empty:
-            # DYNAMIC SORT: Always pick the record with the earliest expiry date
+            # DYNAMIC SORT: Always pick earliest expiry
             if exp_col:
-                # Dropping rows where date conversion failed (like the '0' values)
                 match = match.dropna(subset=[exp_col])
                 match = match.sort_values(by=exp_col, ascending=True)
             
             row = match.iloc[0]
             final_id = str(int(row[id_col]))
-            dynamic_qty = int(row[lot_col]) if lot_col else 35
+            dynamic_qty = int(row[lot_col]) if lot_col else 15 # Default lot size updated
             
-            log_now(f"MATCH FOUND: {row.get('SEM_TRADING_SYMBOL', 'Contract')} (Expiry: {row.get(exp_col)}) -> ID {final_id}, Qty {dynamic_qty}")
+            log_now(f"MATCH FOUND: {row.get('SEM_TRADING_SYMBOL', 'Contract')} -> ID {final_id}, Qty {dynamic_qty}")
             return final_id, strike, dynamic_qty
             
-        return None, strike, 35
+        return None, strike, 15
     except Exception as e:
         log_now(f"LOOKUP ERROR: {e}")
-        return None, None, 35
+        return None, None, 15
 
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
