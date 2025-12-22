@@ -20,24 +20,25 @@ def log_now(msg):
     sys.stderr.flush()
 
 def load_scrip_master():
-    """Robust CSV loader that won't crash on missing columns"""
+    """Robust CSV loader that filters for Bank Nifty Index Options"""
     global SCRIP_MASTER_DATA
     log_now("BOOT: Loading CSV...")
     try:
         df = pd.read_csv(SCRIP_URL, low_memory=False)
         
-        # Filtering for Index Options (OPTIDX) where underlying is Bank Nifty (25)
+        # Identify columns using keywords
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c.upper()), None)
         und_col = next((c for c in df.columns if 'UNDERLYING_SECURITY_ID' in c.upper()), None)
         
         if inst_col and und_col:
+            # Bank Nifty Underlying ID is 25
             SCRIP_MASTER_DATA = df[
                 (df[inst_col].str.contains('OPTIDX', na=False)) & 
                 (df[und_col] == 25)
             ].copy()
             log_now(f"BOOT: Filtered {len(SCRIP_MASTER_DATA)} Bank Nifty contracts.")
         else:
-            log_now("BOOT WARNING: Headers not found. Using raw data.")
+            log_now("BOOT WARNING: Filter columns not found. Using full list.")
             SCRIP_MASTER_DATA = df
             
         log_now("BOOT: CSV Loaded successfully.")
@@ -48,9 +49,9 @@ def load_scrip_master():
 load_scrip_master()
 
 def get_atm_id(price, signal):
-    """Finds nearest ATM strike ID and handles DH-905 SecurityId errors"""
+    """Fix: Picks nearest expiry and dynamic lot size to solve DH-905"""
     try:
-        if SCRIP_MASTER_DATA is None: return None, None
+        if SCRIP_MASTER_DATA is None: return None, None, None
         
         strike = round(float(price) / 100) * 100
         opt_type = "CE" if "BUY" in signal.upper() else "PE"
@@ -58,9 +59,10 @@ def get_atm_id(price, signal):
         cols = SCRIP_MASTER_DATA.columns
         strike_col = next((c for c in cols if 'STRIKE' in c.upper()), None)
         type_col = next((c for c in cols if 'OPTION_TYPE' in c.upper()), None)
-        # DH-905 FIX: Searching for the exact ID column Dhan expects for orders
-        id_col = next((c for c in cols if 'SMST_SECURITY_ID' in c.upper()), None)
         exp_col = next((c for c in cols if 'EXPIRY' in c.upper()), None)
+        lot_col = next((c for c in cols if 'LOT' in c.upper() or 'SEM_LOT_UNIT' in c.upper()), None)
+        id_col = next((c for c in cols if 'SMST_SECURITY_ID' in c.upper()), 
+                 next((c for c in cols if 'TOKEN' in c.upper()), None))
 
         match = SCRIP_MASTER_DATA[
             (SCRIP_MASTER_DATA[strike_col] == strike) & 
@@ -68,18 +70,23 @@ def get_atm_id(price, signal):
         ]
         
         if not match.empty:
-            # Sort by expiry to get the nearest (current week) contract
+            # FIX A: Sort by expiry to always get the nearest (current month) contract
             if exp_col:
-                match = match.sort_values(by=exp_col)
+                match = match.sort_values(by=exp_col, ascending=True)
             
-            # Ensure we get the ID as a clean integer string
-            final_id = str(int(match.iloc[0][id_col]))
-            return final_id, strike
+            row = match.iloc[0]
+            final_id = str(int(row[id_col]))
             
-        return None, strike
+            # FIX B: Use dynamic lot size from CSV instead of hardcoded 35
+            dynamic_qty = int(row[lot_col]) if lot_col else 35
+            
+            log_now(f"MATCH FOUND: {row.get('SEM_TRADING_SYMBOL', 'Contract')} -> ID {final_id}, Qty {dynamic_qty}")
+            return final_id, strike, dynamic_qty
+            
+        return None, strike, 35
     except Exception as e:
-        log_now(f"RUNTIME LOOKUP ERROR: {e}")
-        return None, None
+        log_now(f"LOOKUP ERROR: {e}")
+        return None, None, 35
 
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
@@ -89,20 +96,21 @@ def mlfusion():
         if not data:
             return jsonify({"status": "error", "message": "No JSON"}), 400
 
-        sec_id, strike = get_atm_id(data.get("price"), data.get("message", ""))
+        # Get ID, Strike, and the Dynamic Qty
+        sec_id, strike, qty = get_atm_id(data.get("price"), data.get("message", ""))
         
         if not sec_id:
             log_now(f"FAILED: Strike {strike} not found.")
             return jsonify({"status": "not_found"}), 404
 
-        log_now(f"EXECUTE: Sending Order for SecurityId {sec_id} (ATM {strike})")
+        log_now(f"EXECUTE: Sending Order for SecurityId {sec_id} (ATM {strike}) with Qty {qty}")
 
-        # PLACE ORDER - FIXED QTY 35
+        # PLACE ORDER - Now using dynamic qty
         order = dhan.place_order(
             security_id=sec_id,
             exchange_segment=dhan.NSE_FNO,
             transaction_type=dhan.BUY, 
-            quantity=35, 
+            quantity=qty, 
             order_type=dhan.MARKET,
             product_type=dhan.MARGIN,
             price=0,
@@ -113,7 +121,7 @@ def mlfusion():
         return jsonify(order), 200
 
     except Exception as e:
-        log_now(f"CRITICAL RUNTIME ERROR: {str(e)}")
+        log_now(f"RUNTIME ERROR: {str(e)}")
         return jsonify({"status": "error", "reason": str(e)}), 500
 
 @app.route('/')
