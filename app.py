@@ -71,7 +71,7 @@ def get_atm_id(price, signal):
         exp_col = next((c for c in cols if 'EXPIRY_DATE' in c.upper()), None)
         lot_col = next((c for c in cols if 'LOT' in c.upper() or 'SEM_LOT_UNIT' in c.upper()), None)
         id_col = next((c for c in cols if 'SMST_SECURITY_ID' in c.upper()), 
-                 next((c for c in cols if 'TOKEN' in c.upper()), None))
+                     next((c for c in cols if 'TOKEN' in c.upper()), None))
 
         # Filter by Strike and Type
         match = SCRIP_MASTER_DATA[
@@ -112,4 +112,14 @@ def mlfusion():
             log_now(f"FAILED: Strike {strike} not found.")
             return jsonify({"status": "not_found"}), 404
 
-        log_now(f"EXECUTE: Sending Order for SecurityId {sec_id} with
+        log_now(f"EXECUTE: Sending Order for SecurityId {sec_id} with Qty {qty}")
+        
+        # Note: You can add the dhan.place_order() call here to complete the execution logic.
+        return jsonify({"status": "success", "security_id": sec_id, "quantity": qty})
+
+    except Exception as e:
+        log_now(f"HANDLER ERROR: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
