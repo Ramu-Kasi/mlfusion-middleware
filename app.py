@@ -13,6 +13,8 @@ CLIENT_ID = os.environ.get('DHAN_CLIENT_ID')
 ACCESS_TOKEN = os.environ.get('DHAN_ACCESS_TOKEN')
 dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
+
+# This variable acts as your CACHE
 SCRIP_MASTER_DATA = None
 
 def log_now(msg):
@@ -21,20 +23,20 @@ def log_now(msg):
     sys.stderr.flush()
 
 def load_scrip_master():
-    """STRICT FILTER: Bank Nifty Options only (Excludes BANKEX and non-NSE)"""
+    """LIVE DOWNLOAD: Runs only once at startup to populate the cache"""
     global SCRIP_MASTER_DATA
-    log_now("BOOT: Loading CSV and applying STRICT Bank Nifty filters...")
+    log_now("BOOT: Fetching LIVE CSV from Dhan...")
     try:
+        # Live fetch
         df = pd.read_csv(SCRIP_URL, low_memory=False)
         
-        # Identify columns
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c.upper()), None)
         sym_col = next((c for c in df.columns if 'SYMBOL' in c.upper()), None)
         exch_col = next((c for c in df.columns if 'EXCHANGE' in c.upper()), None)
         exp_col = next((c for c in df.columns if 'EXPIRY_DATE' in c.upper()), None)
         
         if inst_col and sym_col:
-            # Rejects BANKEX and ensures NSE Index Options
+            # Filtering for Bank Nifty only, excluding BANKEX
             mask = (
                 (df[inst_col].str.contains('OPTIDX', na=False)) & 
                 (df[sym_col].str.contains('BANKNIFTY', case=False, na=False)) &
@@ -44,26 +46,27 @@ def load_scrip_master():
             if exch_col:
                 mask = mask & (df[exch_col].str.contains('NSE', case=False, na=False))
 
+            # Store the filtered result in our CACHE
             SCRIP_MASTER_DATA = df[mask].copy()
             
-            # NEAREST EXPIRY VALIDATION: Convert dates for sorting
             if exp_col:
                 SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
                 SCRIP_MASTER_DATA = SCRIP_MASTER_DATA.dropna(subset=[exp_col])
             
-            log_now(f"BOOT: Success! {len(SCRIP_MASTER_DATA)} Bank Nifty contracts loaded.")
+            log_now(f"BOOT: Cache populated with {len(SCRIP_MASTER_DATA)} BN contracts.")
         else:
-            log_now("BOOT ERROR: Essential columns missing.")
+            log_now("BOOT ERROR: Columns missing.")
             
     except Exception as e:
         log_now(f"CRITICAL BOOT ERROR: {e}")
 
-# Initial load
+# This triggers the LIVE download once
 load_scrip_master()
 
 def get_atm_id(price, signal):
-    """Retrieves the Security ID for the NEAREST EXPIRY Bank Nifty contract with Qty 35"""
+    """Uses CACHED data to find the nearest expiry ID"""
     try:
+        # Uses the CACHE populated during boot
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: 
             return None, None, 35
         
@@ -83,7 +86,7 @@ def get_atm_id(price, signal):
         ].copy()
         
         if not match.empty:
-            # --- NEAREST EXPIRY VALIDATION ---
+            # Nearest Expiry Validation
             today = pd.Timestamp(datetime.now().date())
             match = match[match[exp_col] >= today]
             match = match.sort_values(by=exp_col, ascending=True)
@@ -91,8 +94,7 @@ def get_atm_id(price, signal):
             if not match.empty:
                 row = match.iloc[0]
                 final_id = str(int(row[id_col]))
-                expiry_str = row[exp_col].strftime('%Y-%m-%d')
-                log_now(f"MATCH FOUND: {row.get('SEM_TRADING_SYMBOL', 'BN')} | Expiry: {expiry_str} -> ID {final_id}")
+                log_now(f"MATCH FOUND: {row.get('SEM_TRADING_SYMBOL', 'BN')} -> ID {final_id}")
                 return final_id, strike, 35 
             
         return None, strike, 35
@@ -106,22 +108,22 @@ def mlfusion():
     try:
         data = request.get_json(force=True, silent=True)
         if not data:
-            return jsonify({"status": "error", "message": "No JSON payload"}), 400
+            return jsonify({"status": "error", "message": "No JSON"}), 400
 
+        # Processing uses the memory cache
         sec_id, strike, qty = get_atm_id(data.get("price"), data.get("message", ""))
         
         if not sec_id:
             return jsonify({"status": "not_found"}), 404
 
-        # Sending Order with fixed Qty 35
         log_now(f"EXECUTE: Sending Order for SecurityId {sec_id} with Qty {qty}")
-        return jsonify({"status": "success", "security_id": sec_id, "quantity": qty, "strike": strike})
+        return jsonify({"status": "success", "security_id": sec_id, "quantity": qty})
 
     except Exception as e:
         log_now(f"HANDLER ERROR: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
-    # Keeps the server alive on Render
+    # Keeps the app running on Render
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
