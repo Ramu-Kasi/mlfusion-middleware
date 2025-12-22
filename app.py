@@ -35,7 +35,7 @@ def mlfusion():
                 {
                     "transactionType": "S", 
                     "orderType": "MKT", 
-                    "quantity": "0",
+                    "quantity": "1",
                     "exchange": "NSE", 
                     "symbol": ticker, 
                     "instrument": "OPT",
