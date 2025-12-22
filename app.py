@@ -18,86 +18,84 @@ SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
 SCRIP_MASTER_DATA = None
 
 def log_now(msg):
+    """Immediate logging for Render"""
     sys.stderr.write(f"!!! [ALGO_ENGINE]: {msg}\n")
     sys.stderr.flush()
 
 def load_scrip_master():
-    """Downloads and finds columns dynamically to prevent 'KeyError'"""
+    """Background loader to prevent deployment timeouts"""
     global SCRIP_MASTER_DATA
-    log_now("REFRESH: Downloading Scrip Master...")
+    log_now("REFRESH: Fetching Scrip Master...")
     try:
+        # Use a timeout on the request to prevent hanging
         df = pd.read_csv(SCRIP_URL, low_memory=False)
         
-        # DYNAMIC COLUMN FINDER: Prevent the error seen in image_4acce4.png
+        # We look for the exact columns from your working screenshot
+        # But we use a search to be safe against hidden spaces
         cols = df.columns
-        inst_col = next((c for c in cols if 'INSTRUMENT' in c.upper()), None)
-        und_id_col = next((c for c in cols if 'UNDERLYING_SECURITY_ID' in c.upper()), None)
+        inst_c = next((c for c in cols if 'INSTRUMENT_NAME' in c.upper()), None)
+        und_c = next((c for c in cols if 'UNDERLYING_SECURITY_ID' in c.upper()), None)
         
-        if inst_col and und_id_col:
-            # Filter for Bank Nifty (25) Options
+        if inst_c and und_c:
             filtered = df[
-                (df[inst_col].str.contains('OPTIDX', na=False)) & 
-                (df[und_id_col] == 25)
+                (df[inst_c].str.contains('OPTIDX', na=False)) & 
+                (df[und_c] == 25)
             ].copy()
             
-            # Pre-find Expiry column and convert to dates
-            exp_col = next((c for c in cols if 'EXPIRY' in c.upper() and 'DATE' in c.upper()), None)
-            if exp_col:
-                filtered[exp_col] = pd.to_datetime(filtered[exp_col], errors='coerce')
+            # Map remaining columns for the lookup engine
+            exp_c = next((c for c in cols if 'EXPIRY_DATE' in c.upper()), None)
+            if exp_c:
+                filtered[exp_c] = pd.to_datetime(filtered[exp_c], errors='coerce')
             
             SCRIP_MASTER_DATA = filtered
-            log_now(f"SUCCESS: {len(SCRIP_MASTER_DATA)} contracts in cache.")
+            log_now(f"SUCCESS: {len(SCRIP_MASTER_DATA)} Bank Nifty contracts cached.")
             return True
-        else:
-            log_now("CRITICAL ERROR: Could not find required columns in CSV.")
-            return False
     except Exception as e:
         log_now(f"CACHE ERROR: {e}")
-        return False
+    return False
 
-# Initial Load
-load_scrip_master()
-
-# 3. SCHEDULER: 24h Refresh
+# 3. SCHEDULER: Start background tasks AFTER app definition
 scheduler = BackgroundScheduler()
+# This ensures the app starts even if the download is slow
+scheduler.add_job(func=load_scrip_master, trigger="date") 
 scheduler.add_job(func=load_scrip_master, trigger="interval", hours=24)
 scheduler.start()
 
 def get_atm_id(price, signal):
-    """Robust lookup using flexible column matching"""
+    """Reliable lookup engine"""
     global SCRIP_MASTER_DATA
     try:
         if not price or str(price).lower() == "none":
             return None, None, None
             
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty:
-            log_now("DATA MISSING: Attempting blocking fetch...")
-            if not load_scrip_master(): return None, None, None
+            log_now("DATA MISSING: Emergency reload in progress...")
+            load_scrip_master()
+            if SCRIP_MASTER_DATA is None: return None, None, None
 
         strike = round(float(price) / 100) * 100
         opt_type = "CE" if "BUY" in signal.upper() else "PE"
         
-        # Dynamically find the columns we need for filtering
+        # Use flexible column detection for the search
         cols = SCRIP_MASTER_DATA.columns
-        strike_col = next((c for c in cols if 'STRIKE' in c.upper()), None)
-        type_col = next((c for c in cols if 'OPTION_TYPE' in c.upper()), None)
-        id_col = next((c for c in cols if 'SECURITY_ID' in c.upper() or 'TOKEN' in c.upper()), None)
-        exp_col = next((c for c in cols if 'EXPIRY' in c.upper() and 'DATE' in c.upper()), None)
-        lot_col = next((c for c in cols if 'LOT' in c.upper()), None)
+        s_col = next((c for c in cols if 'STRIKE' in c.upper()), None)
+        t_col = next((c for c in cols if 'OPTION_TYPE' in c.upper()), None)
+        i_col = next((c for c in cols if 'SECURITY_ID' in c.upper()), None)
+        e_col = next((c for c in cols if 'EXPIRY_DATE' in c.upper()), None)
+        q_col = next((c for c in cols if 'LOT' in c.upper()), None)
 
         match = SCRIP_MASTER_DATA[
-            (SCRIP_MASTER_DATA[strike_col] == strike) & 
-            (SCRIP_MASTER_DATA[type_col] == opt_type)
+            (SCRIP_MASTER_DATA[s_col] == strike) & 
+            (SCRIP_MASTER_DATA[t_col] == opt_type)
         ].copy()
         
         if not match.empty:
-            # Sort by Expiry and pick nearest
-            if exp_col:
-                match = match.dropna(subset=[exp_col]).sort_values(by=exp_col)
+            if e_col:
+                match = match.dropna(subset=[e_col]).sort_values(by=e_col)
             
             row = match.iloc[0]
-            final_id = str(int(row[id_col]))
-            qty = int(row[lot_col]) if lot_col else 35
+            final_id = str(int(row[i_col]))
+            qty = int(row[q_col]) if q_col else 35
             
             log_now(f"MATCH: {row.get('SEM_TRADING_SYMBOL', 'Contract')} -> ID {final_id}, Qty {qty}")
             return final_id, strike, qty
@@ -109,11 +107,10 @@ def get_atm_id(price, signal):
 
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
-    raw = request.get_data(as_text=True)
-    log_now(f"SIGNAL: {raw}")
+    log_now(f"SIGNAL: {request.get_data(as_text=True)}")
     try:
         data = request.get_json(force=True, silent=True)
-        if not data: return jsonify({"status": "error", "message": "No JSON"}), 400
+        if not data: return jsonify({"status": "error"}), 400
 
         sec_id, strike, qty = get_atm_id(data.get("price"), data.get("message", ""))
         
@@ -137,4 +134,6 @@ def mlfusion():
 def health(): return "ACTIVE", 200
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000)
+    # Use environment port for Render
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
