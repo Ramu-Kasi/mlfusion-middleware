@@ -34,7 +34,6 @@ def load_scrip_master():
         exp_col = next((c for c in df.columns if 'EXPIRY_DATE' in c.upper()), None)
         
         if inst_col and sym_col:
-            # THE "ONLY BANK NIFTY" FILTER:
             # Rejects BANKEX and ensures NSE Index Options
             mask = (
                 (df[inst_col].str.contains('OPTIDX', na=False)) & 
@@ -78,7 +77,6 @@ def get_atm_id(price, signal):
         id_col = next((c for c in cols if 'SMST_SECURITY_ID' in c.upper()), 
                      next((c for c in cols if 'TOKEN' in c.upper()), None))
 
-        # Filter for the specific Strike and Option Type
         match = SCRIP_MASTER_DATA[
             (SCRIP_MASTER_DATA[strike_col] == strike) & 
             (SCRIP_MASTER_DATA[type_col] == opt_type)
@@ -113,10 +111,9 @@ def mlfusion():
         sec_id, strike, qty = get_atm_id(data.get("price"), data.get("message", ""))
         
         if not sec_id:
-            log_now(f"FAILED: No Bank Nifty contract found for strike {strike}")
             return jsonify({"status": "not_found"}), 404
 
-        # Fixed line 115 from previous error
+        # Sending Order with fixed Qty 35
         log_now(f"EXECUTE: Sending Order for SecurityId {sec_id} with Qty {qty}")
         return jsonify({"status": "success", "security_id": sec_id, "quantity": qty, "strike": strike})
 
@@ -124,7 +121,7 @@ def mlfusion():
         log_now(f"HANDLER ERROR: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# --- FIX FOR RENDER DEPLOYMENT ---
 if __name__ == '__main__':
+    # Keeps the server alive on Render
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
