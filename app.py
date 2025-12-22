@@ -13,8 +13,6 @@ CLIENT_ID = os.environ.get('DHAN_CLIENT_ID')
 ACCESS_TOKEN = os.environ.get('DHAN_ACCESS_TOKEN')
 dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
-
-# This variable acts as your CACHE
 SCRIP_MASTER_DATA = None
 
 def log_now(msg):
@@ -23,11 +21,10 @@ def log_now(msg):
     sys.stderr.flush()
 
 def load_scrip_master():
-    """LIVE DOWNLOAD: Runs only once at startup to populate the cache"""
+    """STRICT FILTER: Bank Nifty Options only (Excludes BANKEX and non-NSE)"""
     global SCRIP_MASTER_DATA
-    log_now("BOOT: Fetching LIVE CSV from Dhan...")
+    log_now("BOOT: Loading CSV and applying STRICT Bank Nifty filters...")
     try:
-        # Live fetch
         df = pd.read_csv(SCRIP_URL, low_memory=False)
         
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c.upper()), None)
@@ -36,7 +33,6 @@ def load_scrip_master():
         exp_col = next((c for c in df.columns if 'EXPIRY_DATE' in c.upper()), None)
         
         if inst_col and sym_col:
-            # Filtering for Bank Nifty only, excluding BANKEX
             mask = (
                 (df[inst_col].str.contains('OPTIDX', na=False)) & 
                 (df[sym_col].str.contains('BANKNIFTY', case=False, na=False)) &
@@ -46,27 +42,25 @@ def load_scrip_master():
             if exch_col:
                 mask = mask & (df[exch_col].str.contains('NSE', case=False, na=False))
 
-            # Store the filtered result in our CACHE
             SCRIP_MASTER_DATA = df[mask].copy()
             
             if exp_col:
                 SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
                 SCRIP_MASTER_DATA = SCRIP_MASTER_DATA.dropna(subset=[exp_col])
             
-            log_now(f"BOOT: Cache populated with {len(SCRIP_MASTER_DATA)} BN contracts.")
+            log_now(f"BOOT: Success! {len(SCRIP_MASTER_DATA)} Bank Nifty contracts loaded.")
         else:
-            log_now("BOOT ERROR: Columns missing.")
+            log_now("BOOT ERROR: Essential columns missing.")
             
     except Exception as e:
         log_now(f"CRITICAL BOOT ERROR: {e}")
 
-# This triggers the LIVE download once
+# Initial load
 load_scrip_master()
 
 def get_atm_id(price, signal):
-    """Uses CACHED data to find the nearest expiry ID"""
+    """Retrieves the Security ID for the NEAREST EXPIRY Bank Nifty contract with Qty 35"""
     try:
-        # Uses the CACHE populated during boot
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: 
             return None, None, 35
         
@@ -86,7 +80,6 @@ def get_atm_id(price, signal):
         ].copy()
         
         if not match.empty:
-            # Nearest Expiry Validation
             today = pd.Timestamp(datetime.now().date())
             match = match[match[exp_col] >= today]
             match = match.sort_values(by=exp_col, ascending=True)
@@ -108,16 +101,30 @@ def mlfusion():
     try:
         data = request.get_json(force=True, silent=True)
         if not data:
-            return jsonify({"status": "error", "message": "No JSON"}), 400
+            return jsonify({"status": "error", "message": "No JSON payload"}), 400
 
-        # Processing uses the memory cache
         sec_id, strike, qty = get_atm_id(data.get("price"), data.get("message", ""))
         
         if not sec_id:
             return jsonify({"status": "not_found"}), 404
 
-        log_now(f"EXECUTE: Sending Order for SecurityId {sec_id} with Qty {qty}")
-        return jsonify({"status": "success", "security_id": sec_id, "quantity": qty})
+        # --- MODIFIED: ACTUAL ORDER PLACEMENT ---
+        transaction_type = dhan.BUY if "BUY" in data.get("message", "").upper() else dhan.SELL
+        
+        order = dhan.place_order(
+            tag='MLFusion_BN',
+            transaction_type=transaction_type,
+            exchange_segment=dhan.NSE_FNO,
+            product_type=dhan.INTRA,      # Can change to dhan.MARGIN for carry-forward
+            order_type=dhan.MARKET,
+            validity=dhan.DAY,
+            security_id=sec_id,
+            quantity=qty,
+            price=0                       # Market orders use 0
+        )
+
+        log_now(f"EXECUTE: Dhan API Response: {order}")
+        return jsonify({"status": "success", "order_data": order})
 
     except Exception as e:
         log_now(f"HANDLER ERROR: {e}")
