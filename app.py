@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import requests
-import logging
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -16,20 +15,19 @@ EXPIRY_DATE = "2025-12-30"
 def mlfusion():
     try:
         data = request.get_json()
-        # Force immediate print of incoming data
         print(f"\n--- [STEP 1] INCOMING ALERT ---\n{data}", flush=True)
         
         signal = str(data.get("message", "")).upper()
         ticker = data.get("ticker", "BANKNIFTY")
-        price = float(data.get("price", 0))
+        price_val = float(data.get("price", 0))
         
         # Strike Selection Logic
         new_opt_type = "CE" if "BUY" in signal else "PE"
-        step = 100 if "BANK" in ticker.upper() else 50
-        atm = int(round(price / step) * step)
+        step = 100
+        atm = int(round(price_val / step) * step)
         itm_strike = (atm - step) if new_opt_type == "CE" else (atm + step)
 
-        # BUILD DHAN PAYLOAD
+        # BUILD DHAN PAYLOAD (Added "price": "0")
         dhan_payload = {
             "secret": DHAN_SECRET,
             "alertType": "multi_leg_order",
@@ -43,6 +41,7 @@ def mlfusion():
                     "instrument": "OPT",
                     "productType": "M", 
                     "sort_order": "1", 
+                    "price": "0", # <--- Added missing field
                     "manage_position": "EXIT_ALL"
                 },
                 {
@@ -54,32 +53,28 @@ def mlfusion():
                     "instrument": "OPT",
                     "productType": "M", 
                     "sort_order": "2", 
+                    "price": "0", # <--- Added missing field
                     "option_type": new_opt_type,
-                    "strike_price": f"{float(itm_strike):.1f}", # Decimal + String format
+                    "strike_price": f"{float(itm_strike):.1f}", 
                     "expiry_date": EXPIRY_DATE
                 }
             ]
         }
 
-        # --- [STEP 2] PRINT FULL JSON BEFORE SENDING ---
-        print("\n--- [STEP 2] PAYLOAD BEING SENT TO DHAN ---", flush=True)
+        # Print the final payload for verification
+        print("\n--- [STEP 2] PAYLOAD BEING SENT ---", flush=True)
         print(json.dumps(dhan_payload, indent=4), flush=True)
-        print("-------------------------------------------\n", flush=True)
 
-        # SEND TO DHAN
+        # HIT WEBHOOK
         resp = requests.post(DHAN_WEBHOOK_URL, json=dhan_payload, timeout=15)
         
-        print(f"--- [STEP 3] DHAN RESPONSE ---\n{resp.text}\n(HTTP {resp.status_code})", flush=True)
+        print(f"--- [STEP 3] DHAN RESPONSE ---\n{resp.text}", flush=True)
         
         return jsonify({"bridge_status": "success", "dhan_raw": resp.text}), 200
 
     except Exception as e:
         print(f"!!! BRIDGE CRASHED: {str(e)}", flush=True)
         return jsonify({"error": str(e)}), 500
-
-@app.route('/')
-def status():
-    return "<h1>Bridge is Online</h1>"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
