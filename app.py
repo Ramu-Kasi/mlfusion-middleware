@@ -27,9 +27,9 @@ def load_scrip_master():
     global SCRIP_MASTER_DATA
     log_now("REFRESH: Fetching and Caching Scrip Master...")
     try:
+        # Optimization: low_memory=False to ensure data types are consistent
         df = pd.read_csv(SCRIP_URL, low_memory=False)
         
-        # Core Filter Logic maintained
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c.upper()), None)
         und_col = next((c for c in df.columns if 'UNDERLYING_SECURITY_ID' in c.upper()), None)
         
@@ -39,11 +39,11 @@ def load_scrip_master():
                 (df[und_col] == 25)
             ].copy()
             
-            # Pre-convert dates for instant sorting
             exp_col = next((c for c in df.columns if 'EXPIRY_DATE' in c.upper()), None)
             if exp_col:
                 filtered_df[exp_col] = pd.to_datetime(filtered_df[exp_col], errors='coerce')
             
+            # ATOMIC UPDATE: We set the global variable only after processing is 100% done
             SCRIP_MASTER_DATA = filtered_df
             log_now(f"SUCCESS: Cached {len(SCRIP_MASTER_DATA)} Bank Nifty contracts.")
             return True
@@ -60,17 +60,19 @@ scheduler.add_job(func=load_scrip_master, trigger="interval", hours=24)
 scheduler.start()
 
 def get_atm_id(price, signal):
-    """Instant lookup with Lazy Loading fallback"""
+    """Instant lookup with Blocking Lazy Loading fallback"""
     global SCRIP_MASTER_DATA
     try:
         if price is None or str(price).strip() == "" or str(price).lower() == "none":
             log_now("INPUT ERROR: Price received is None or empty.")
             return None, None, None
             
-        # LAZY LOAD: If cache is empty, try loading it now instead of failing
+        # BLOCKING LAZY LOAD: We wait for this to finish before proceeding
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty:
-            log_now("CACHE EMPTY: Attempting emergency lazy load...")
-            if not load_scrip_master():
+            log_now("CACHE EMPTY: Forcing blocking lazy load...")
+            load_success = load_scrip_master() # This call now blocks until finished
+            if not load_success or SCRIP_MASTER_DATA is None:
+                log_now("CRITICAL: Failed to load data during emergency fetch.")
                 return None, None, None
         
         strike = round(float(price) / 100) * 100
@@ -114,6 +116,7 @@ def mlfusion():
         if not data:
             return jsonify({"status": "error", "message": "No JSON"}), 400
 
+        # Pass the extracted price and message to the lookup engine
         sec_id, strike, qty = get_atm_id(data.get("price"), data.get("message", ""))
         
         if not sec_id:
