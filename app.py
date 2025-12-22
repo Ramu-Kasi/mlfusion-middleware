@@ -32,8 +32,8 @@ def load_scrip_master():
         sym_col = next((c for c in df.columns if 'SYMBOL' in c.upper()), None)
         
         if inst_col and und_col:
-            # FIX: Mandatory filter for 'BANKNIFTY' in symbol to stop PAGEIND
-            # Also filtering for Index Options (OPTIDX) and Underlying 25 (Bank Nifty)
+            # STRICT FILTER: Index Options (OPTIDX) + Bank Nifty (25) + Symbol check
+            # This ensures PAGEIND and other stocks are removed from memory
             SCRIP_MASTER_DATA = df[
                 (df[inst_col].str.contains('OPTIDX', na=False)) & 
                 (df[und_col] == 25) &
@@ -58,4 +58,58 @@ def load_scrip_master():
 load_scrip_master()
 
 def get_atm_id(price, signal):
-    """Finds nearest ATM strike ID with 35 qty default [cite: 1.1, 4.1
+    """Finds nearest ATM strike ID with 35 qty default"""
+    try:
+        if SCRIP_MASTER_DATA is None: return None, None, 35
+        
+        strike = round(float(price) / 100) * 100
+        opt_type = "CE" if "BUY" in signal.upper() else "PE"
+        
+        cols = SCRIP_MASTER_DATA.columns
+        strike_col = next((c for c in cols if 'STRIKE' in c.upper()), None)
+        type_col = next((c for c in cols if 'OPTION_TYPE' in c.upper()), None)
+        exp_col = next((c for c in cols if 'EXPIRY_DATE' in c.upper()), None)
+        lot_col = next((c for c in cols if 'LOT' in c.upper() or 'SEM_LOT_UNIT' in c.upper()), None)
+        id_col = next((c for c in cols if 'SMST_SECURITY_ID' in c.upper()), 
+                 next((c for c in cols if 'TOKEN' in c.upper()), None))
+
+        # Filter by Strike and Type
+        match = SCRIP_MASTER_DATA[
+            (SCRIP_MASTER_DATA[strike_col] == strike) & 
+            (SCRIP_MASTER_DATA[type_col] == opt_type)
+        ].copy()
+        
+        if not match.empty:
+            # DYNAMIC SORT: Always pick the record with the earliest expiry date
+            if exp_col:
+                match = match.dropna(subset=[exp_col])
+                match = match.sort_values(by=exp_col, ascending=True)
+            
+            row = match.iloc[0]
+            final_id = str(int(row[id_col]))
+            # DEFAULT QTY FIXED TO 35
+            dynamic_qty = int(row[lot_col]) if lot_col else 35
+            
+            log_now(f"MATCH FOUND: {row.get('SEM_TRADING_SYMBOL', 'Contract')} -> ID {final_id}, Qty {dynamic_qty}")
+            return final_id, strike, dynamic_qty
+            
+        return None, strike, 35
+    except Exception as e:
+        log_now(f"LOOKUP ERROR: {e}")
+        return None, None, 35
+
+@app.route('/mlfusion', methods=['POST'])
+def mlfusion():
+    log_now(f"SIGNAL RECEIVED: {request.get_data(as_text=True)}")
+    try:
+        data = request.get_json(force=True, silent=True)
+        if not data:
+            return jsonify({"status": "error", "message": "No JSON"}), 400
+
+        sec_id, strike, qty = get_atm_id(data.get("price"), data.get("message", ""))
+        
+        if not sec_id:
+            log_now(f"FAILED: Strike {strike} not found.")
+            return jsonify({"status": "not_found"}), 404
+
+        log_now(f"EXECUTE: Sending Order for SecurityId {sec_id} with
