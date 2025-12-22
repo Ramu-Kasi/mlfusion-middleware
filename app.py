@@ -58,14 +58,23 @@ def load_scrip_master():
 # Initial load
 load_scrip_master()
 
-def get_atm_id(price, signal):
-    """Retrieves the Security ID for the NEAREST EXPIRY Bank Nifty contract with Qty 35"""
+def get_itm_id(price, signal):
+    """Retrieves the Security ID for 1-Step ITM Bank Nifty contract (Qty 35)"""
     try:
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: 
             return None, None, 35
         
-        strike = round(float(price) / 100) * 100
+        # Calculate base ATM strike
+        atm_strike = round(float(price) / 100) * 100
         opt_type = "CE" if "BUY" in signal.upper() else "PE"
+
+        # --- ITM LOGIC ---
+        # 1-Step ITM for CE: Subtract 100 points
+        # 1-Step ITM for PE: Add 100 points
+        if opt_type == "CE":
+            strike = atm_strike - 100
+        else:
+            strike = atm_strike + 100
         
         cols = SCRIP_MASTER_DATA.columns
         strike_col = next((c for c in cols if 'STRIKE' in c.upper()), None)
@@ -80,6 +89,7 @@ def get_atm_id(price, signal):
         ].copy()
         
         if not match.empty:
+            # Nearest Expiry Validation
             today = pd.Timestamp(datetime.now().date())
             match = match[match[exp_col] >= today]
             match = match.sort_values(by=exp_col, ascending=True)
@@ -87,7 +97,7 @@ def get_atm_id(price, signal):
             if not match.empty:
                 row = match.iloc[0]
                 final_id = str(int(row[id_col]))
-                log_now(f"MATCH FOUND: {row.get('SEM_TRADING_SYMBOL', 'BN')} -> ID {final_id}")
+                log_now(f"ITM MATCH: {row.get('SEM_TRADING_SYMBOL', 'BN')} | Strike: {strike} -> ID {final_id}")
                 return final_id, strike, 35 
             
         return None, strike, 35
@@ -103,27 +113,28 @@ def mlfusion():
         if not data:
             return jsonify({"status": "error", "message": "No JSON payload"}), 400
 
-        sec_id, strike, qty = get_atm_id(data.get("price"), data.get("message", ""))
+        # Now calls the ITM function
+        sec_id, strike, qty = get_itm_id(data.get("price"), data.get("message", ""))
         
         if not sec_id:
             return jsonify({"status": "not_found"}), 404
 
-        # --- MODIFIED: ACTUAL ORDER PLACEMENT ---
         transaction_type = dhan.BUY if "BUY" in data.get("message", "").upper() else dhan.SELL
         
+        # Placing the order with ITM Security ID
         order = dhan.place_order(
-            tag='MLFusion_BN',
+            tag='MLFusion_BN_ITM',
             transaction_type=transaction_type,
             exchange_segment=dhan.NSE_FNO,
-            product_type=dhan.INTRA,      # Can change to dhan.MARGIN for carry-forward
+            product_type=dhan.INTRA,
             order_type=dhan.MARKET,
             validity=dhan.DAY,
             security_id=sec_id,
             quantity=qty,
-            price=0                       # Market orders use 0
+            price=0
         )
 
-        log_now(f"EXECUTE: Dhan API Response: {order}")
+        log_now(f"EXECUTE: ITM Order Sent. Strike: {strike} | Response: {order}")
         return jsonify({"status": "success", "order_data": order})
 
     except Exception as e:
@@ -131,6 +142,6 @@ def mlfusion():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
-    # Keeps the app running on Render
+    # Fix for Render deployment
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
