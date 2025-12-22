@@ -3,6 +3,7 @@ import sys
 import pandas as pd
 from flask import Flask, request, jsonify
 from dhanhq import dhanhq
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # 1. INITIALIZE APP
 app = Flask(__name__)
@@ -12,6 +13,8 @@ CLIENT_ID = os.environ.get('DHAN_CLIENT_ID')
 ACCESS_TOKEN = os.environ.get('DHAN_ACCESS_TOKEN')
 dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
+
+# GLOBAL CACHE
 SCRIP_MASTER_DATA = None
 
 def log_now(msg):
@@ -20,44 +23,48 @@ def log_now(msg):
     sys.stderr.flush()
 
 def load_scrip_master():
-    """Robust CSV loader that filters for Bank Nifty Index Options"""
+    """Downloads and filters CSV once, then caches in memory"""
     global SCRIP_MASTER_DATA
-    log_now("BOOT: Loading CSV...")
+    log_now("REFRESH: Fetching and Caching Scrip Master...")
     try:
         df = pd.read_csv(SCRIP_URL, low_memory=False)
         
-        # Identify columns using keywords
+        # Core Filter Logic: Bank Nifty (25) and Options (OPTIDX)
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c.upper()), None)
         und_col = next((c for c in df.columns if 'UNDERLYING_SECURITY_ID' in c.upper()), None)
         
         if inst_col and und_col:
-            # Bank Nifty Underlying ID is 25
-            SCRIP_MASTER_DATA = df[
+            filtered_df = df[
                 (df[inst_col].str.contains('OPTIDX', na=False)) & 
                 (df[und_col] == 25)
             ].copy()
             
-            # DYNAMIC DATE CONVERSION: Convert expiry to datetime for proper sorting
+            # Pre-convert dates to ensure dynamic expiry sorting works instantly
             exp_col = next((c for c in df.columns if 'EXPIRY_DATE' in c.upper()), None)
             if exp_col:
-                SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
+                filtered_df[exp_col] = pd.to_datetime(filtered_df[exp_col], errors='coerce')
             
-            log_now(f"BOOT: Filtered {len(SCRIP_MASTER_DATA)} Bank Nifty contracts.")
+            SCRIP_MASTER_DATA = filtered_df
+            log_now(f"SUCCESS: Cached {len(SCRIP_MASTER_DATA)} Bank Nifty contracts.")
         else:
-            log_now("BOOT WARNING: Filter columns not found. Using full list.")
-            SCRIP_MASTER_DATA = df
+            log_now("WARNING: Required columns not found. Cache failed.")
             
-        log_now("BOOT: CSV Loaded successfully.")
     except Exception as e:
-        log_now(f"CRITICAL BOOT ERROR: {e}")
+        log_now(f"CACHE ERROR: {e}")
 
-# Load the cache on start
+# Initial Load on Startup
 load_scrip_master()
 
+# 3. SCHEDULER: Refresh cache every 24 hours
+scheduler = BackgroundScheduler()
+scheduler.add_job(func=load_scrip_master, trigger="interval", hours=24)
+scheduler.start()
+
 def get_atm_id(price, signal):
-    """Finds nearest ATM strike ID with dynamic expiry sorting"""
+    """Instant lookup from cached memory"""
     try:
-        if SCRIP_MASTER_DATA is None: return None, None, None
+        if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty:
+            return None, None, None
         
         strike = round(float(price) / 100) * 100
         opt_type = "CE" if "BUY" in signal.upper() else "PE"
@@ -70,24 +77,22 @@ def get_atm_id(price, signal):
         id_col = next((c for c in cols if 'SMST_SECURITY_ID' in c.upper()), 
                  next((c for c in cols if 'TOKEN' in c.upper()), None))
 
-        # Filter by Strike and Type
+        # Filter by Strike and Type from Cache
         match = SCRIP_MASTER_DATA[
             (SCRIP_MASTER_DATA[strike_col] == strike) & 
             (SCRIP_MASTER_DATA[type_col] == opt_type)
         ].copy()
         
         if not match.empty:
-            # DYNAMIC SORT: Always pick the record with the earliest expiry date
+            # DYNAMIC SORT: Always pick the nearest expiry
             if exp_col:
-                # Dropping rows where date conversion failed (like the '0' values)
-                match = match.dropna(subset=[exp_col])
-                match = match.sort_values(by=exp_col, ascending=True)
+                match = match.dropna(subset=[exp_col]).sort_values(by=exp_col, ascending=True)
             
             row = match.iloc[0]
             final_id = str(int(row[id_col]))
             dynamic_qty = int(row[lot_col]) if lot_col else 35
             
-            log_now(f"MATCH FOUND: {row.get('SEM_TRADING_SYMBOL', 'Contract')} (Expiry: {row.get(exp_col)}) -> ID {final_id}, Qty {dynamic_qty}")
+            log_now(f"MATCH: {row.get('SEM_TRADING_SYMBOL', 'Contract')} -> ID {final_id}, Qty {dynamic_qty}")
             return final_id, strike, dynamic_qty
             
         return None, strike, 35
@@ -97,7 +102,7 @@ def get_atm_id(price, signal):
 
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
-    log_now(f"SIGNAL RECEIVED: {request.get_data(as_text=True)}")
+    log_now(f"SIGNAL: {request.get_data(as_text=True)}")
     try:
         data = request.get_json(force=True, silent=True)
         if not data:
@@ -109,7 +114,7 @@ def mlfusion():
             log_now(f"FAILED: Strike {strike} not found.")
             return jsonify({"status": "not_found"}), 404
 
-        log_now(f"EXECUTE: Sending Order for SecurityId {sec_id} with Qty {qty}")
+        log_now(f"EXECUTE: Sending Order for ID {sec_id} with Qty {qty}")
 
         order = dhan.place_order(
             security_id=sec_id,
@@ -134,5 +139,6 @@ def health():
     return "BRIDGE_ACTIVE", 200
 
 if __name__ == "__main__":
+    # RESTORED: Port 5000 as requested [cite: 2025-12-22]
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
