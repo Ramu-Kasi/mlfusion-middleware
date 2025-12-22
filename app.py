@@ -4,7 +4,7 @@ import pandas as pd
 from flask import Flask, request, jsonify
 from dhanhq import dhanhq
 
-# 1. INITIALIZE APP FIRST
+# 1. INITIALIZE APP
 app = Flask(__name__)
 
 # 2. CONFIGURATION
@@ -19,33 +19,31 @@ SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
 SCRIP_MASTER_DATA = None
 
 def log_now(msg):
-    """Immediate logging for Render"""
     print(f"!!! [ALGO_ENGINE]: {msg}", file=sys.stderr, flush=True)
 
 def load_scrip_master():
-    """Robust CSV loader that dynamically finds Bank Nifty"""
+    """Robust CSV loader for Bank Nifty"""
     global SCRIP_MASTER_DATA
-    log_now("BOOT: Fetching Scrip Master into RAM...")
+    log_now("BOOT: Fetching Scrip Master...")
     try:
-        # Load the CSV without forcing columns to prevent 'Usecols' errors
+        # Load full CSV
         df = pd.read_csv(SCRIP_URL, low_memory=False)
         
-        # Filter for Index Options (OPTIDX) + Bank Nifty (Underlying 25)
-        # This reduces the 50MB file to just a few KB in RAM
+        # Filter for Index Options (OPTIDX) where Underlying is Bank Nifty (25)
         SCRIP_MASTER_DATA = df[
             (df['SEM_INSTRUMENT_NAME'] == 'OPTIDX') & 
             (df['SEM_UNDERLYING_SECURITY_ID'] == 25)
         ].copy()
         
-        log_now(f"BOOT: Success! Cached {len(SCRIP_MASTER_DATA)} Bank Nifty contracts.")
+        log_now(f"BOOT: Success! {len(SCRIP_MASTER_DATA)} Bank Nifty contracts cached.")
     except Exception as e:
         log_now(f"BOOT ERROR: {e}")
 
-# Load the cache on start
+# Load data on start
 load_scrip_master()
 
 def get_atm_id(price, signal):
-    """Finds nearest ATM strike ID in milliseconds"""
+    """Finds nearest ATM strike ID"""
     try:
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty:
             return None, None
@@ -61,7 +59,7 @@ def get_atm_id(price, signal):
         ]
         
         if not match.empty:
-            # Sort by expiry to get the nearest (weekly) contract
+            # Sort by expiry to get nearest contract
             match = match.sort_values(by='SEM_EXPIRY_DATE')
             return str(int(match.iloc[0]['SEM_SMST_SECURITY_ID'])), strike
             
@@ -72,9 +70,49 @@ def get_atm_id(price, signal):
 
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
-    # Debug: See exactly what TradingView is sending
+    # Log incoming request for safety
     raw_body = request.get_data(as_text=True)
-    log_now(f"SIGNAL RECEIVED: {raw_body}")
+    log_now(f"SIGNAL: {raw_body}")
 
     try:
-        data = request.get_json(force=True
+        # FIXED: Balanced parentheses below
+        data = request.get_json(force=True, silent=True)
+        
+        if not data:
+            log_now("ERROR: Invalid JSON structure")
+            return jsonify({"status": "error", "message": "Invalid JSON"}), 400
+
+        tv_price = data.get("price")
+        signal = data.get("message", "")
+
+        # 1. Lookup ATM Security ID
+        sec_id, strike = get_atm_id(tv_price, signal)
+        
+        if not sec_id:
+            log_now(f"NOT FOUND: Strike {strike}")
+            return jsonify({"status": "not_found"}), 404
+
+        log_now(f"EXECUTE: {signal} ATM {strike} (ID: {sec_id})")
+
+        # 2. PLACE ORDER (QTY 35)
+        order = dhan.place_order(
+            security_id=sec_id,
+            exchange_segment=dhan.NSE_FNO,
+            transaction_type=dhan.BUY, 
+            quantity=35, 
+            order_type=dhan.MARKET,
+            product_type=dhan.MARGIN,
+            price=0,
+            validity='DAY'
+        )
+
+        log_now(f"RESPONSE: {order}")
+        return jsonify(order), 200
+
+    except Exception as e:
+        log_now(f"CRITICAL: {str(e)}")
+        return jsonify({"status": "error", "reason": str(e)}), 500
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
