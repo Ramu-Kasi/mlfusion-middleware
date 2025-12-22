@@ -36,6 +36,12 @@ def load_scrip_master():
                 (df[inst_col].str.contains('OPTIDX', na=False)) & 
                 (df[und_col] == 25)
             ].copy()
+            
+            # DYNAMIC DATE CONVERSION: Convert expiry to datetime for proper sorting
+            exp_col = next((c for c in df.columns if 'EXPIRY_DATE' in c.upper()), None)
+            if exp_col:
+                SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
+            
             log_now(f"BOOT: Filtered {len(SCRIP_MASTER_DATA)} Bank Nifty contracts.")
         else:
             log_now("BOOT WARNING: Filter columns not found. Using full list.")
@@ -49,7 +55,7 @@ def load_scrip_master():
 load_scrip_master()
 
 def get_atm_id(price, signal):
-    """Fix: Picks nearest expiry and dynamic lot size to solve DH-905"""
+    """Finds nearest ATM strike ID with dynamic expiry sorting"""
     try:
         if SCRIP_MASTER_DATA is None: return None, None, None
         
@@ -59,28 +65,29 @@ def get_atm_id(price, signal):
         cols = SCRIP_MASTER_DATA.columns
         strike_col = next((c for c in cols if 'STRIKE' in c.upper()), None)
         type_col = next((c for c in cols if 'OPTION_TYPE' in c.upper()), None)
-        exp_col = next((c for c in cols if 'EXPIRY' in c.upper()), None)
+        exp_col = next((c for c in cols if 'EXPIRY_DATE' in c.upper()), None)
         lot_col = next((c for c in cols if 'LOT' in c.upper() or 'SEM_LOT_UNIT' in c.upper()), None)
         id_col = next((c for c in cols if 'SMST_SECURITY_ID' in c.upper()), 
                  next((c for c in cols if 'TOKEN' in c.upper()), None))
 
+        # Filter by Strike and Type
         match = SCRIP_MASTER_DATA[
             (SCRIP_MASTER_DATA[strike_col] == strike) & 
             (SCRIP_MASTER_DATA[type_col] == opt_type)
-        ]
+        ].copy()
         
         if not match.empty:
-            # FIX A: Sort by expiry to always get the nearest (current month) contract
+            # DYNAMIC SORT: Always pick the record with the earliest expiry date
             if exp_col:
+                # Dropping rows where date conversion failed (like the '0' values)
+                match = match.dropna(subset=[exp_col])
                 match = match.sort_values(by=exp_col, ascending=True)
             
             row = match.iloc[0]
             final_id = str(int(row[id_col]))
-            
-            # FIX B: Use dynamic lot size from CSV instead of hardcoded 35
             dynamic_qty = int(row[lot_col]) if lot_col else 35
             
-            log_now(f"MATCH FOUND: {row.get('SEM_TRADING_SYMBOL', 'Contract')} -> ID {final_id}, Qty {dynamic_qty}")
+            log_now(f"MATCH FOUND: {row.get('SEM_TRADING_SYMBOL', 'Contract')} (Expiry: {row.get(exp_col)}) -> ID {final_id}, Qty {dynamic_qty}")
             return final_id, strike, dynamic_qty
             
         return None, strike, 35
@@ -96,16 +103,14 @@ def mlfusion():
         if not data:
             return jsonify({"status": "error", "message": "No JSON"}), 400
 
-        # Get ID, Strike, and the Dynamic Qty
         sec_id, strike, qty = get_atm_id(data.get("price"), data.get("message", ""))
         
         if not sec_id:
             log_now(f"FAILED: Strike {strike} not found.")
             return jsonify({"status": "not_found"}), 404
 
-        log_now(f"EXECUTE: Sending Order for SecurityId {sec_id} (ATM {strike}) with Qty {qty}")
+        log_now(f"EXECUTE: Sending Order for SecurityId {sec_id} with Qty {qty}")
 
-        # PLACE ORDER - Now using dynamic qty
         order = dhan.place_order(
             security_id=sec_id,
             exchange_segment=dhan.NSE_FNO,
