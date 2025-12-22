@@ -29,7 +29,7 @@ def load_scrip_master():
     try:
         df = pd.read_csv(SCRIP_URL, low_memory=False)
         
-        # Core Filter Logic: Bank Nifty (25) and Options (OPTIDX)
+        # Core Filter Logic maintained
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c.upper()), None)
         und_col = next((c for c in df.columns if 'UNDERLYING_SECURITY_ID' in c.upper()), None)
         
@@ -39,16 +39,13 @@ def load_scrip_master():
                 (df[und_col] == 25)
             ].copy()
             
-            # Pre-convert dates to ensure dynamic expiry sorting works instantly
+            # Pre-convert dates for instant sorting
             exp_col = next((c for c in df.columns if 'EXPIRY_DATE' in c.upper()), None)
             if exp_col:
                 filtered_df[exp_col] = pd.to_datetime(filtered_df[exp_col], errors='coerce')
             
             SCRIP_MASTER_DATA = filtered_df
             log_now(f"SUCCESS: Cached {len(SCRIP_MASTER_DATA)} Bank Nifty contracts.")
-        else:
-            log_now("WARNING: Required columns not found. Cache failed.")
-            
     except Exception as e:
         log_now(f"CACHE ERROR: {e}")
 
@@ -63,7 +60,13 @@ scheduler.start()
 def get_atm_id(price, signal):
     """Instant lookup from cached memory"""
     try:
+        # SAFETY CHECK: Prevent 'Strike None' error
+        if price is None or str(price).strip() == "" or str(price).lower() == "none":
+            log_now("INPUT ERROR: Price received is None or empty.")
+            return None, None, None
+            
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty:
+            log_now("CACHE ERROR: Data not loaded.")
             return None, None, None
         
         strike = round(float(price) / 100) * 100
@@ -77,14 +80,13 @@ def get_atm_id(price, signal):
         id_col = next((c for c in cols if 'SMST_SECURITY_ID' in c.upper()), 
                  next((c for c in cols if 'TOKEN' in c.upper()), None))
 
-        # Filter by Strike and Type from Cache
         match = SCRIP_MASTER_DATA[
             (SCRIP_MASTER_DATA[strike_col] == strike) & 
             (SCRIP_MASTER_DATA[type_col] == opt_type)
         ].copy()
         
         if not match.empty:
-            # DYNAMIC SORT: Always pick the nearest expiry
+            # DYNAMIC SORT: Always pick nearest expiry
             if exp_col:
                 match = match.dropna(subset=[exp_col]).sort_values(by=exp_col, ascending=True)
             
@@ -102,7 +104,8 @@ def get_atm_id(price, signal):
 
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
-    log_now(f"SIGNAL: {request.get_data(as_text=True)}")
+    raw_data = request.get_data(as_text=True)
+    log_now(f"SIGNAL: {raw_data}")
     try:
         data = request.get_json(force=True, silent=True)
         if not data:
@@ -114,7 +117,7 @@ def mlfusion():
             log_now(f"FAILED: Strike {strike} not found.")
             return jsonify({"status": "not_found"}), 404
 
-        log_now(f"EXECUTE: Sending Order for ID {sec_id} with Qty {qty}")
+        log_now(f"EXECUTE: Sending Order for SecurityId {sec_id} with Qty {qty}")
 
         order = dhan.place_order(
             security_id=sec_id,
@@ -139,6 +142,5 @@ def health():
     return "BRIDGE_ACTIVE", 200
 
 if __name__ == "__main__":
-    # RESTORED: Port 5000 as requested [cite: 2025-12-22]
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
