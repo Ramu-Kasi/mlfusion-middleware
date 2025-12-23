@@ -1,19 +1,20 @@
 import os
 import sys
 import pandas as pd
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string
 from dhanhq import dhanhq
 from datetime import datetime
 
 # 1. INITIALIZE APP
 app = Flask(__name__)
 
-# 2. CONFIGURATION
+# 2. CONFIGURATION & STATE
 CLIENT_ID = os.environ.get('DHAN_CLIENT_ID')
 ACCESS_TOKEN = os.environ.get('DHAN_ACCESS_TOKEN')
 dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
 SCRIP_MASTER_DATA = None
+TRADE_HISTORY = [] # Stores summary data for the dashboard
 
 def log_now(msg):
     """Force logs to show in Render immediately"""
@@ -54,16 +55,12 @@ def close_opposite_position(type_to_close):
     """Rule-based closer: Squares off existing BN options of the opposite type"""
     try:
         positions = dhan.get_positions()
-        # If no positions exist, positions['data'] is usually an empty list or None
         if positions.get('status') == 'success' and positions.get('data'):
             for pos in positions['data']:
                 symbol = pos.get('tradingSymbol', '')
                 qty = int(pos.get('netQty', 0))
-                
-                # Check for active Bank Nifty position of the opposite type
                 if "BANKNIFTY" in symbol and symbol.endswith(type_to_close) and qty != 0:
                     log_now(f"RULE: Closing {symbol} (Qty: {qty}) before reversal.")
-                    
                     dhan.place_order(
                         tag='MLFusion_Exit',
                         transaction_type=dhan.SELL if qty > 0 else dhan.BUY,
@@ -85,11 +82,8 @@ def get_itm_id(price, signal):
     try:
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: 
             return None, None
-        
         atm_strike = round(float(price) / 100) * 100
         opt_type = "CE" if "BUY" in signal.upper() else "PE"
-
-        # 1-Step ITM Logic: CE (Atm-100), PE (Atm+100)
         strike = (atm_strike - 100) if opt_type == "CE" else (atm_strike + 100)
         
         cols = SCRIP_MASTER_DATA.columns
@@ -108,60 +102,109 @@ def get_itm_id(price, signal):
             today = pd.Timestamp(datetime.now().date())
             match = match[match[exp_col] >= today]
             match = match.sort_values(by=exp_col, ascending=True)
-            
             if not match.empty:
                 row = match.iloc[0]
                 return str(int(row[id_col])), strike
-            
         return None, strike
     except Exception as e:
         log_now(f"LOOKUP ERROR: {e}")
         return None, None
 
+@app.route('/')
+def dashboard():
+    """Simple HTML Summary Page"""
+    html = """
+    <html>
+        <head><title>MLFusion BN Summary</title>
+        <style>
+            body { font-family: sans-serif; margin: 40px; background: #f4f4f9; }
+            table { width: 100%; border-collapse: collapse; background: white; }
+            th, td { padding: 12px; border: 1px solid #ddd; text-align: left; }
+            th { background: #333; color: white; }
+            .CE { color: green; font-weight: bold; }
+            .PE { color: red; font-weight: bold; }
+            .executed { color: blue; }
+        </style></head>
+        <body>
+            <h2>Bank Nifty Strategy Summary</h2>
+            <p><b>Total Trades:</b> {{ count }}</p>
+            <table>
+                <tr>
+                    <th>Time</th>
+                    <th>Price</th>
+                    <th>ITM Strike</th>
+                    <th>Type</th>
+                    <th>Status</th>
+                    <th>Dhan Response</th>
+                </tr>
+                {% for t in trades %}
+                <tr>
+                    <td>{{ t.time }}</td>
+                    <td>{{ t.price }}</td>
+                    <td>{{ t.strike }}</td>
+                    <td class="{{ t.type }}">{{ t.type }}</td>
+                    <td class="executed">{{ t.status }}</td>
+                    <td>{{ t.response }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+        </body>
+    </html>
+    """
+    return render_template_string(html, trades=reversed(TRADE_HISTORY), count=len(TRADE_HISTORY))
+
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
     log_now(f"SIGNAL RECEIVED: {request.get_data(as_text=True)}")
+    trade_info = {
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "price": "N/A", "strike": "N/A", "type": "N/A", "status": "Failed", "response": ""
+    }
     try:
         data = request.get_json(force=True, silent=True)
-        if not data:
-            return jsonify({"status": "error", "message": "No JSON"}), 400
+        if not data: return jsonify({"status": "error"}), 400
 
         signal = data.get("message", "").upper()
+        current_price = data.get("price")
+        trade_info["price"] = current_price
         
-        # Reversal Logic Definition
         if "BUY" in signal:
             current_type, opposite_type = "CE", "PE"
         else:
             current_type, opposite_type = "PE", "CE"
+        
+        trade_info["type"] = current_type
 
-        # 1. Attempt to close opposite (won't fail if none exist)
+        # 1. Reversal logic
         close_opposite_position(opposite_type)
 
-        # 2. Fetch ITM Strike
-        sec_id, strike = get_itm_id(data.get("price"), signal)
+        # 2. Get ITM
+        sec_id, strike = get_itm_id(current_price, signal)
+        trade_info["strike"] = strike
         
         if not sec_id:
-            log_now(f"FAILED: No ITM {current_type} found for strike {strike}")
+            trade_info["status"] = "No ID Found"
+            TRADE_HISTORY.append(trade_info)
             return jsonify({"status": "not_found"}), 404
 
-        # 3. Buy 1 lot (35 Qty)
+        # 3. Order
         order = dhan.place_order(
-            tag='MLFusion_BN',
-            transaction_type=dhan.BUY, 
-            exchange_segment=dhan.NSE_FNO,
-            product_type=dhan.INTRA,
-            order_type=dhan.MARKET,
-            validity=dhan.DAY,
-            security_id=sec_id,
-            quantity=35, 
-            price=0
+            tag='MLFusion_BN', transaction_type=dhan.BUY, exchange_segment=dhan.NSE_FNO,
+            product_type=dhan.INTRA, order_type=dhan.MARKET, validity=dhan.DAY,
+            security_id=sec_id, quantity=35, price=0
         )
 
-        log_now(f"EXECUTE: Opened {current_type} ITM {strike} | Response: {order}")
+        # Update Summary
+        trade_info["status"] = "Executed"
+        trade_info["response"] = str(order.get('data', {}).get('orderId', 'Accepted'))
+        TRADE_HISTORY.append(trade_info)
+
+        log_now(f"EXECUTE: Opened {current_type} ITM {strike}")
         return jsonify({"status": "success", "order_data": order})
 
     except Exception as e:
-        log_now(f"HANDLER ERROR: {e}")
+        trade_info["response"] = str(e)
+        TRADE_HISTORY.append(trade_info)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
