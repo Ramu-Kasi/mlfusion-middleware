@@ -34,7 +34,6 @@ def load_scrip_master():
         exp_col = next((c for c in df.columns if 'EXPIRY_DATE' in c.upper()), None)
         
         if inst_col and sym_col:
-            # Rejects BANKEX and ensures NSE Index Options
             mask = (
                 (df[inst_col].str.contains('OPTIDX', na=False)) & 
                 (df[sym_col].str.contains('BANKNIFTY', case=False, na=False)) &
@@ -51,7 +50,6 @@ def load_scrip_master():
     except Exception as e:
         log_now(f"CRITICAL BOOT ERROR: {e}")
 
-# Triggered during deployment
 load_scrip_master()
 
 def close_opposite_position(type_to_close):
@@ -63,7 +61,6 @@ def close_opposite_position(type_to_close):
                 symbol = pos.get('tradingSymbol', '')
                 qty = int(pos.get('netQty', 0))
                 
-                # Check for active Bank Nifty position of the opposite type
                 if "BANKNIFTY" in symbol and symbol.endswith(type_to_close) and qty != 0:
                     log_now(f"RULE: Closing {symbol} (Qty: {qty}) before reversal.")
                     
@@ -79,8 +76,8 @@ def close_opposite_position(type_to_close):
                         price=0
                     )
                     log_now(f"EXIT RESPONSE: {exit_order}")
-                    # 1-second wait to ensure exit is processed before next entry
-                    time.sleep(1) 
+                    # Reduced to 100 milliseconds for speed
+                    time.sleep(0.1) 
         return True
     except Exception as e:
         log_now(f"REVERSAL ERROR: {e}")
@@ -94,8 +91,6 @@ def get_itm_id(price, signal):
         
         atm_strike = round(float(price) / 100) * 100
         opt_type = "CE" if "BUY" in signal.upper() else "PE"
-
-        # 1-Step ITM Logic: CE (Atm-100), PE (Atm+100)
         strike = (atm_strike - 100) if opt_type == "CE" else (atm_strike + 100)
         
         cols = SCRIP_MASTER_DATA.columns
@@ -110,10 +105,8 @@ def get_itm_id(price, signal):
         ].copy()
         
         if not match.empty:
-            # Nearest Expiry Validation
             today = pd.Timestamp(datetime.now().date())
-            match = match[match[exp_col] >= today]
-            match = match.sort_values(by=exp_col, ascending=True)
+            match = match[match[exp_col] >= today].sort_values(by=exp_col, ascending=True)
             
             if not match.empty:
                 row = match.iloc[0]
@@ -139,16 +132,18 @@ def dashboard():
             .PE { color: red; font-weight: bold; }
             .status-failure { color: #d9534f; font-weight: bold; }
             .status-success { color: #5cb85c; font-weight: bold; }
-        </style></head>
+        </style>
+        <meta http-equiv="refresh" content="30">
+        </head>
         <body>
             <h2>Bank Nifty Strategy Summary</h2>
             <p><b>Total Trades:</b> {{ count }}</p>
             <table>
                 <tr>
                     <th>Time</th>
-                    <th>Price</th>
+                    <th>Index Price</th>
                     <th>ITM Strike</th>
-                    <th>Trade Type</th>
+                    <th>Type</th>
                     <th>Dhan Status</th>
                     <th>Remarks / Order ID</th>
                 </tr>
@@ -178,7 +173,7 @@ def mlfusion():
     try:
         data = request.get_json(force=True, silent=True)
         if not data:
-            return jsonify({"status": "error", "message": "No JSON"}), 400
+            return jsonify({"status": "error"}), 400
 
         signal = data.get("message", "").upper()
         current_price = data.get("price")
@@ -187,7 +182,7 @@ def mlfusion():
         current_type, opposite_type = ("CE", "PE") if "BUY" in signal else ("PE", "CE")
         trade_info["type"] = current_type
 
-        # 1. Reversal: Close opposite leg
+        # 1. Quick Reversal
         close_opposite_position(opposite_type)
 
         # 2. Get ITM ID
@@ -196,42 +191,14 @@ def mlfusion():
         
         if not sec_id:
             trade_info["status"] = "Failure"
-            trade_info["remarks"] = "No matching ITM strike found"
+            trade_info["remarks"] = "No matching ITM found"
             TRADE_HISTORY.append(trade_info)
             return jsonify({"status": "not_found"}), 404
 
-        # 3. Buy 1 lot (35 Qty)
+        # 3. Quick Entry (35 Qty)
         order = dhan.place_order(
             tag='MLFusion_BN',
             transaction_type=dhan.BUY, 
             exchange_segment=dhan.NSE_FNO,
             product_type=dhan.INTRA,
             order_type=dhan.MARKET,
-            validity=dhan.DAY,
-            security_id=sec_id,
-            quantity=35, 
-            price=0
-        )
-
-        # Update History with Dhan's Response
-        trade_info["status"] = order.get('status', 'Failure')
-        if trade_info["status"] == "success":
-            trade_info["remarks"] = f"OrderID: {order.get('data', {}).get('orderId', 'N/A')}"
-        else:
-            trade_info["remarks"] = order.get('remarks', 'API Error/Market Closed')
-
-        TRADE_HISTORY.append(trade_info)
-        log_now(f"DHAN RESPONSE: {order}")
-        
-        return jsonify({"status": trade_info["status"], "order_data": order})
-
-    except Exception as e:
-        trade_info["status"] = "Failure"
-        trade_info["remarks"] = str(e)
-        TRADE_HISTORY.append(trade_info)
-        log_now(f"HANDLER ERROR: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
