@@ -23,22 +23,22 @@ def log_now(msg):
     sys.stderr.flush()
 
 def load_scrip_master():
-    """BOOT: Aggressive column identification for SecurityID to avoid DH-905"""
+    """BOOT: Filters data once to ensure fast startup"""
     global SCRIP_MASTER_DATA
     log_now("BOOT: Loading Master CSV and filtering Bank Nifty...")
     try:
         df = pd.read_csv(SCRIP_URL, low_memory=False)
         
-        # Identify columns dynamically
+        # Dynamic Column Detection
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c.upper()), None)
         sym_col = next((c for c in df.columns if 'SYMBOL' in c.upper()), None)
         exch_col = next((c for c in df.columns if 'EXCHANGE' in c.upper()), None)
         exp_col = next((c for c in df.columns if 'EXPIRY_DATE' in c.upper()), None)
         strike_col = next((c for c in df.columns if 'STRIKE' in c.upper()), None)
+        id_col = next((c for c in df.columns if 'SECURITY_ID' in c.upper() or 'SMST' in c.upper()), None)
         type_col = next((c for c in df.columns if 'OPTION_TYPE' in c.upper()), None)
-        id_col = next((c for c in df.columns if 'SMST_SECURITY_ID' in c.upper() or 'SECURITY_ID' in c.upper()), None)
 
-        # Filter: Bank Nifty NSE Index Options
+        # STRICT FILTER: Bank Nifty NSE Index Options Only
         mask = (
             (df[inst_col].str.contains('OPTIDX', na=False)) & 
             (df[sym_col].str.contains('BANKNIFTY', case=False, na=False)) &
@@ -47,12 +47,9 @@ def load_scrip_master():
         if exch_col:
             mask = mask & (df[exch_col].str.contains('NSE', case=False, na=False))
 
-        # Memory pruning
         needed_cols = [id_col, strike_col, type_col, exp_col]
         SCRIP_MASTER_DATA = df[mask][needed_cols].copy()
         
-        # Format IDs and Dates properly
-        SCRIP_MASTER_DATA[id_col] = SCRIP_MASTER_DATA[id_col].astype(str).str.split('.').str[0]
         SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
         SCRIP_MASTER_DATA = SCRIP_MASTER_DATA.dropna(subset=[exp_col])
         
@@ -60,11 +57,11 @@ def load_scrip_master():
     except Exception as e:
         log_now(f"CRITICAL BOOT ERROR: {e}")
 
-# Run the master load during the Render build/deploy phase
+# Triggered during deployment boot
 load_scrip_master()
 
 def close_opposite_position(type_to_close):
-    """Reversal closer with 100ms delay"""
+    """CORE LOGIC: Reversal closer with 100ms delay"""
     try:
         positions = dhan.get_positions()
         if positions.get('status') == 'success' and positions.get('data'):
@@ -85,14 +82,14 @@ def close_opposite_position(type_to_close):
                         quantity=abs(qty),
                         price=0
                     )
-                    time.sleep(0.1) 
+                    time.sleep(0.1) # FAST REVERSAL DELAY
         return True
     except Exception as e:
         log_now(f"REVERSAL ERROR: {e}")
         return False
 
 def get_itm_id(price, signal):
-    """NEAREST EXPIRY LOOKUP: FIXED TRY/EXCEPT BLOCK STRUCTURE"""
+    """CORE LOGIC: 1-Step ITM Lookup"""
     try:
         if SCRIP_MASTER_DATA is None: 
             return None, None
@@ -109,14 +106,11 @@ def get_itm_id(price, signal):
         ].copy()
         
         if not match.empty:
-            # FIXED LINE 112: Ensure today calculation and sorting is inside the try block
             today = pd.Timestamp(datetime.now().date())
-            match = match[match[exp_col] >= today]
-            match = match.sort_values(by=exp_col, ascending=True)
-            
+            match = match[match[exp_col] >= today].sort_values(by=exp_col)
             if not match.empty:
                 row = match.iloc[0]
-                return str(row[id_col]), strike
+                return str(int(row[id_col])), strike
         return None, strike
     except Exception as e:
         log_now(f"LOOKUP ERROR: {e}")
@@ -124,7 +118,7 @@ def get_itm_id(price, signal):
 
 @app.route('/')
 def dashboard():
-    """Summary Page remains intact"""
+    """SUMMARY PAGE: Auto-refreshing trades"""
     html = """
     <html>
         <head>
@@ -162,8 +156,67 @@ def dashboard():
 
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
-    """Signal handler with verified DH-905 fix logic"""
+    """SIGNAL HANDLER: Execution flow"""
     log_now(f"SIGNAL RECEIVED: {request.get_data(as_text=True)}")
     trade_info = {
         "time": datetime.now().strftime("%H:%M:%S"),
-        "price": "N/
+        "price": "N/A", "strike": "N/A", "type": "N/A", "status": "Pending", "remarks": ""
+    }
+    try:
+        data = request.get_json(force=True, silent=True)
+        if not data: 
+            return jsonify({"status": "error", "message": "No JSON"}), 400
+
+        signal = data.get("message", "").upper()
+        current_price = data.get("price")
+        trade_info["price"] = current_price
+        
+        current_type, opposite_type = ("CE", "PE") if "BUY" in signal else ("PE", "CE")
+        trade_info["type"] = current_type
+
+        # 1. Close opposite leg
+        close_opposite_position(opposite_type)
+
+        # 2. Get ITM ID
+        sec_id, strike = get_itm_id(current_price, signal)
+        trade_info["strike"] = strike
+        
+        if not sec_id:
+            trade_info["status"] = "Failure"
+            trade_info["remarks"] = "Strike lookup failed"
+            TRADE_HISTORY.append(trade_info)
+            return jsonify({"status": "not_found"}), 404
+
+        # 3. Buy 1 lot (35 Qty)
+        order = dhan.place_order(
+            tag='MLFusion_BN',
+            transaction_type=dhan.BUY, 
+            exchange_segment=dhan.NSE_FNO,
+            product_type=dhan.INTRA,
+            order_type=dhan.MARKET,
+            validity=dhan.DAY,
+            security_id=sec_id,
+            quantity=35, 
+            price=0
+        )
+
+        trade_info["status"] = order.get('status', 'failure')
+        if trade_info["status"] == "success":
+            trade_info["remarks"] = f"OrderID: {order.get('data', {}).get('orderId', 'N/A')}"
+        else:
+            trade_info["remarks"] = order.get('remarks', 'API Error/Market Closed')
+
+        TRADE_HISTORY.append(trade_info)
+        log_now(f"DHAN RESPONSE: {order}")
+        return jsonify({"status": trade_info["status"], "order_data": order})
+
+    except Exception as e:
+        trade_info["status"] = "Error"
+        trade_info["remarks"] = str(e)
+        TRADE_HISTORY.append(trade_info)
+        log_now(f"HANDLER ERROR: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
