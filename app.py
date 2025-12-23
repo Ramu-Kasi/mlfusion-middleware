@@ -60,6 +60,7 @@ def load_scrip_master():
     except Exception as e:
         log_now(f"CRITICAL BOOT ERROR: {e}")
 
+# Run the master load during the Render build/deploy phase
 load_scrip_master()
 
 def close_opposite_position(type_to_close):
@@ -91,7 +92,7 @@ def close_opposite_position(type_to_close):
         return False
 
 def get_itm_id(price, signal):
-    """NEAREST EXPIRY LOOKUP: Finds 1-Step ITM ID for closest date"""
+    """NEAREST EXPIRY LOOKUP: FIXED TRY/EXCEPT BLOCK STRUCTURE"""
     try:
         if SCRIP_MASTER_DATA is None: 
             return None, None
@@ -108,5 +109,61 @@ def get_itm_id(price, signal):
         ].copy()
         
         if not match.empty:
-            # 1. Filter for today or future expiries
-            today = pd.Timestamp
+            # FIXED LINE 112: Ensure today calculation and sorting is inside the try block
+            today = pd.Timestamp(datetime.now().date())
+            match = match[match[exp_col] >= today]
+            match = match.sort_values(by=exp_col, ascending=True)
+            
+            if not match.empty:
+                row = match.iloc[0]
+                return str(row[id_col]), strike
+        return None, strike
+    except Exception as e:
+        log_now(f"LOOKUP ERROR: {e}")
+        return None, None
+
+@app.route('/')
+def dashboard():
+    """Summary Page remains intact"""
+    html = """
+    <html>
+        <head>
+            <title>MLFusion Live Dashboard</title>
+            <meta http-equiv="refresh" content="30">
+            <style>
+                body { font-family: sans-serif; margin: 40px; background: #f4f4f9; }
+                table { width: 100%; border-collapse: collapse; background: white; }
+                th, td { padding: 12px; border: 1px solid #ddd; text-align: left; }
+                th { background: #333; color: white; }
+                .CE { color: green; font-weight: bold; }
+                .PE { color: red; font-weight: bold; }
+            </style>
+        </head>
+        <body>
+            <h2>Bank Nifty Live Summary</h2>
+            <p><b>Total Signal Count:</b> {{ count }}</p>
+            <table>
+                <tr><th>Time</th><th>Price</th><th>Strike</th><th>Type</th><th>Dhan Status</th><th>Remarks</th></tr>
+                {% for t in trades %}
+                <tr>
+                    <td>{{ t.time }}</td>
+                    <td>{{ t.price }}</td>
+                    <td>{{ t.strike }}</td>
+                    <td class="{{ t.type }}">{{ t.type }}</td>
+                    <td>{{ t.status }}</td>
+                    <td>{{ t.remarks }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+        </body>
+    </html>
+    """
+    return render_template_string(html, trades=reversed(TRADE_HISTORY), count=len(TRADE_HISTORY))
+
+@app.route('/mlfusion', methods=['POST'])
+def mlfusion():
+    """Signal handler with verified DH-905 fix logic"""
+    log_now(f"SIGNAL RECEIVED: {request.get_data(as_text=True)}")
+    trade_info = {
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "price": "N/
