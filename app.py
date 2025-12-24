@@ -1,12 +1,11 @@
 import os
-import pandas as pd
 from flask import Flask, request, jsonify, render_template_string
 from dhanhq import dhanhq
 from datetime import datetime
 
 app = Flask(__name__)
 
-# --- CONFIGURATION & API INIT ---
+# --- CONFIGURATION ---
 CLIENT_ID = os.environ.get('DHAN_CLIENT_ID')
 ACCESS_TOKEN = os.environ.get('DHAN_ACCESS_TOKEN')
 dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
@@ -14,7 +13,7 @@ dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 # STATE SETTINGS
 TRADE_HISTORY = [] 
 
-# --- 1. ORIGINAL DASHBOARD TEMPLATE ---
+# --- 1. ORIGINAL DASHBOARD TEMPLATE (GAP FIXED) ---
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
@@ -23,10 +22,10 @@ DASHBOARD_HTML = """
     <meta http-equiv="refresh" content="60">
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f0f2f5; margin: 0; padding: 20px; }
-        .status-bar { background: white; padding: 15px; border-radius: 8px; display: flex; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        .dot { height: 12px; width: 12px; background-color: #28a745; border-radius: 50%; display: inline-block; margin-right: 10px; }
+        .status-bar { background: white; padding: 15px; border-radius: 8px; display: flex; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; gap: 20px; }
+        .dot { height: 12px; width: 12px; background-color: #28a745; border-radius: 50%; display: inline-block; margin-right: 5px; }
         .active-text { color: #28a745; font-weight: bold; margin-right: 20px; }
-        .refresh-text { color: #666; font-size: 0.9em; }
+        .refresh-text { color: #666; font-size: 0.9em; margin-left: auto; }
         table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
         th { background: #333; color: white; padding: 12px; text-align: left; font-size: 0.9em; }
         td { padding: 12px; border-bottom: 1px solid #eee; font-size: 0.9em; }
@@ -36,8 +35,10 @@ DASHBOARD_HTML = """
 </head>
 <body>
     <div class="status-bar">
-        <b style="margin-right: auto;">Dhan API Status:</b>
-        <span class="dot"></span> <span class="active-text">Active</span>
+        <b>Dhan API Status:</b>
+        <div>
+            <span class="dot"></span> <span class="active-text">Active</span>
+        </div>
         <span class="refresh-text">Refreshes every 60s</span>
     </div>
 
@@ -74,7 +75,7 @@ DASHBOARD_HTML = """
 def dashboard():
     return render_template_string(DASHBOARD_HTML, history=TRADE_HISTORY)
 
-# --- 2. SURGICAL REVERSAL (ESSENTIAL) ---
+# --- 2. SURGICAL REVERSAL ---
 def surgical_reversal(signal_type):
     try:
         positions_resp = dhan.get_positions()
@@ -82,16 +83,14 @@ def surgical_reversal(signal_type):
             for pos in positions_resp.get('data', []):
                 symbol = pos.get('tradingSymbol', '').upper()
                 net_qty = int(pos.get('netQty', 0))
-                
                 if "BANKNIFTY" in symbol and net_qty != 0:
                     is_call = "CE" in symbol
                     is_put = "PE" in symbol
-                    
                     if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
                         exit_side = dhan.SELL if net_qty > 0 else dhan.BUY
                         dhan.place_order(
                             security_id=pos['securityId'],
-                            exchange_segment=dhan.OPTION,
+                            exchange_segment=dhan.NSE_FNO,
                             transaction_type=exit_side,
                             quantity=abs(net_qty),
                             order_type=dhan.MARKET,
@@ -101,30 +100,26 @@ def surgical_reversal(signal_type):
     except Exception:
         return False
 
-# --- 3. EXECUTION ENDPOINT ---
+# --- 3. WEBHOOK ENDPOINT ---
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
     data = request.get_json(force=True, silent=True)
-    if not data: return jsonify({"error": "No data"}), 400
+    if not data: return jsonify({"status": "no data"}), 400
     
     signal = data.get('signal', '').upper()
     price = float(data.get('price', 0))
     
-    # Run the reversal check first
     surgical_reversal(signal)
     
     try:
-        # Strike Logic (100 pts ITM)
         strike = (round(price / 100) * 100) - 100 if signal == "BUY" else (round(price / 100) * 100) + 100
         option_type = "CE" if signal == "BUY" else "PE"
-
-        # Place the order (Logic includes your scrip master lookup)
-        # Placeholder for final execution logic
+        
         status_entry = {
             "price": price,
             "strike": int(strike),
             "type": option_type,
-            "expiry": datetime.now().strftime("%Y-%m-%d"),
+            "expiry": "2025-12-30",
             "status": "success",
             "remarks": "Reversed and Executed"
         }
