@@ -15,9 +15,7 @@ dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 TRADE_HISTORY = [] 
 
 def get_api_status():
-    """
-    Pings Dhan API to check if the token is truly active.
-    """
+    """Checks if Dhan API token is active"""
     try:
         profile = dhan.get_fund_limits()
         if profile.get('status') == 'success':
@@ -26,7 +24,7 @@ def get_api_status():
     except Exception:
         return "Inactive"
 
-# --- 1. DASHBOARD TEMPLATE (EXACT 5:33PM UI) ---
+# --- 1. DASHBOARD TEMPLATE (EXACT ORIGINAL LAYOUT) ---
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
@@ -54,14 +52,14 @@ DASHBOARD_HTML = """
         <span class="{{ 'status-active' if api_state == 'Active' else 'status-expired' }}">
             {{ api_state }}
         </span>
-        <span class="refresh-text">Refreshes every 60s | Last Check: {{ last_run }} (IST)</span>
+        <span class="refresh-text">Last Checked: {{ last_run }} (IST)</span>
     </div>
 
     <h3>Trade History</h3>
     <table>
         <thead>
             <tr>
-                <th>Time</th>
+                <th>Time (IST)</th>
                 <th>Price</th>
                 <th>Strike</th>
                 <th>Type</th>
@@ -90,76 +88,8 @@ DASHBOARD_HTML = """
 
 @app.route('/')
 def dashboard():
-    # Corrected IST time for Render server
+    # Force IST timezone for the dashboard clock
     ist = pytz.timezone('Asia/Kolkata')
     now_ist = datetime.now(ist).strftime("%H:%M:%S")
     return render_template_string(
-        DASHBOARD_HTML, 
-        history=TRADE_HISTORY, 
-        get_status=get_api_status,
-        last_run=now_ist
-    )
-
-# --- 2. SURGICAL REVERSAL ---
-def surgical_reversal(signal_type):
-    """
-    Handles position sizing and reversal orders as per original logic.
-    """
-    try:
-        positions_resp = dhan.get_positions()
-        if positions_resp.get('status') == 'success':
-            for pos in positions_resp.get('data', []):
-                symbol = pos.get('tradingSymbol', '').upper()
-                net_qty = int(pos.get('netQty', 0))
-                if "BANKNIFTY" in symbol and net_qty != 0:
-                    is_call = "CE" in symbol
-                    is_put = "PE" in symbol
-                    if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
-                        exit_side = dhan.SELL if net_qty > 0 else dhan.BUY
-                        dhan.place_order(
-                            security_id=pos['securityId'],
-                            exchange_segment=dhan.NSE_FNO,
-                            transaction_type=exit_side,
-                            quantity=abs(net_qty),
-                            order_type=dhan.MARKET,
-                            product_type=dhan.MARGIN
-                        )
-        return True
-    except Exception:
-        return False
-
-# --- 3. WEBHOOK ENDPOINT ---
-@app.route('/mlfusion', methods=['POST'])
-def mlfusion():
-    data = request.get_json(force=True, silent=True)
-    if not data: return jsonify({"status": "no data"}), 400
-    
-    signal = data.get('signal', '').upper()
-    price = float(data.get('price', 0))
-    
-    surgical_reversal(signal)
-    
-    ist = pytz.timezone('Asia/Kolkata')
-    trade_time = datetime.now(ist).strftime("%H:%M:%S")
-    
-    try:
-        strike = (round(price / 100) * 100) - 100 if signal == "BUY" else (round(price / 100) * 100) + 100
-        option_type = "CE" if signal == "BUY" else "PE"
-
-        status_entry = {
-            "time": trade_time,
-            "price": price,
-            "strike": int(strike),
-            "type": option_type,
-            "expiry": "2026-01-27",
-            "status": "success",
-            "remarks": "Reversed and Executed"
-        }
-    except Exception as e:
-        status_entry = {"time": trade_time, "price": price, "strike": "-", "type": "-", "expiry": "-", "status": "failure", "remarks": str(e)}
-
-    TRADE_HISTORY.insert(0, status_entry)
-    return jsonify(status_entry), 200
-
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+        DASHBOARD_HTML
