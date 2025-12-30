@@ -15,7 +15,9 @@ dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 TRADE_HISTORY = [] 
 
 def get_api_status():
-    """Checks if Dhan API token is active"""
+    """
+    Pings Dhan API to check if the token is truly active.
+    """
     try:
         profile = dhan.get_fund_limits()
         if profile.get('status') == 'success':
@@ -35,8 +37,9 @@ DASHBOARD_HTML = """
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f0f2f5; margin: 0; padding: 20px; }
         .status-bar { background: white; padding: 15px; border-radius: 8px; display: flex; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; gap: 20px; }
         .dot { height: 12px; width: 12px; border-radius: 50%; display: inline-block; margin-right: 5px; }
-        .status-active { background-color: #28a745; color: #fff; padding: 2px 10px; border-radius: 10px; font-size: 0.9em; font-weight: bold; }
-        .status-expired { background-color: #dc3545; color: #fff; padding: 2px 10px; border-radius: 10px; font-size: 0.9em; font-weight: bold; }
+        .status-active { background-color: #28a745; color: #28a745; }
+        .status-expired { background-color: #dc3545; color: #dc3545; }
+        .status-text { font-weight: bold; }
         .refresh-text { color: #666; font-size: 0.9em; margin-left: auto; }
         table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
         th { background: #333; color: white; padding: 12px; text-align: left; font-size: 0.9em; }
@@ -49,9 +52,10 @@ DASHBOARD_HTML = """
     <div class="status-bar">
         <b>Dhan API Status:</b>
         {% set api_state = get_status() %}
-        <span class="{{ 'status-active' if api_state == 'Active' else 'status-expired' }}">
-            {{ api_state }}
-        </span>
+        <div>
+            <span class="dot {{ 'status-active' if api_state == 'Active' else 'status-expired' }}"></span> 
+            <span class="status-text {{ 'status-active' if api_state == 'Active' else 'status-expired' }}">{{ api_state }}</span>
+        </div>
         <span class="refresh-text">Last Checked: {{ last_run }} (IST)</span>
     </div>
 
@@ -88,8 +92,17 @@ DASHBOARD_HTML = """
 
 @app.route('/')
 def dashboard():
-    # Force IST timezone for the dashboard clock
+    # Corrected IST time for Render server
     ist = pytz.timezone('Asia/Kolkata')
     now_ist = datetime.now(ist).strftime("%H:%M:%S")
     return render_template_string(
-        DASHBOARD_HTML
+        DASHBOARD_HTML, 
+        history=TRADE_HISTORY, 
+        get_status=get_api_status,
+        last_run=now_ist
+    )
+
+# --- 2. SURGICAL REVERSAL (RESTORED EXACTLY) ---
+def surgical_reversal(signal_type):
+    """
+    Handles position sizing and reversal orders as per original logic.
