@@ -115,11 +115,15 @@ def mlfusion():
         strike = (round(price / 100) * 100) - 100 if signal == "BUY" else (round(price / 100) * 100) + 100
         option_type = "CE" if signal == "BUY" else "PE"
         
+        # Note: In production, you would fetch the security_id for the specific strike/expiry here
+        # Example of adding the actual entry order with the new lot size:
+        # dhan.place_order(..., quantity=30, ...) 
+
         status_entry = {
             "price": price,
             "strike": int(strike),
             "type": option_type,
-            "expiry": "2025-12-30",
+            "expiry": "2026-01-27",
             "status": "success",
             "remarks": "Reversed and Executed"
         }
