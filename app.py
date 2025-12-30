@@ -13,7 +13,19 @@ dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 # STATE SETTINGS
 TRADE_HISTORY = [] 
 
-# --- 1. ORIGINAL DASHBOARD TEMPLATE (GAP FIXED) ---
+def get_api_status():
+    """
+    Pings Dhan API to check if the token is truly active.
+    """
+    try:
+        profile = dhan.get_fund_limits()
+        if profile.get('status') == 'success':
+            return "Active"
+        return "Expired"
+    except Exception:
+        return "Inactive"
+
+# --- 1. DASHBOARD TEMPLATE ---
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
@@ -23,8 +35,10 @@ DASHBOARD_HTML = """
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f0f2f5; margin: 0; padding: 20px; }
         .status-bar { background: white; padding: 15px; border-radius: 8px; display: flex; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; gap: 20px; }
-        .dot { height: 12px; width: 12px; background-color: #28a745; border-radius: 50%; display: inline-block; margin-right: 5px; }
-        .active-text { color: #28a745; font-weight: bold; margin-right: 20px; }
+        .dot { height: 12px; width: 12px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .status-active { background-color: #28a745; color: #28a745; }
+        .status-expired { background-color: #dc3545; color: #dc3545; }
+        .status-text { font-weight: bold; }
         .refresh-text { color: #666; font-size: 0.9em; margin-left: auto; }
         table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
         th { background: #333; color: white; padding: 12px; text-align: left; font-size: 0.9em; }
@@ -36,10 +50,12 @@ DASHBOARD_HTML = """
 <body>
     <div class="status-bar">
         <b>Dhan API Status:</b>
+        {% set api_state = get_status() %}
         <div>
-            <span class="dot"></span> <span class="active-text">Active</span>
+            <span class="dot {{ 'status-active' if api_state == 'Active' else 'status-expired' }}"></span> 
+            <span class="status-text {{ 'status-active' if api_state == 'Active' else 'status-expired' }}">{{ api_state }}</span>
         </div>
-        <span class="refresh-text">Refreshes every 60s</span>
+        <span class="refresh-text">Last Checked: {{ last_run }}</span>
     </div>
 
     <h3>Trade History</h3>
@@ -73,7 +89,12 @@ DASHBOARD_HTML = """
 
 @app.route('/')
 def dashboard():
-    return render_template_string(DASHBOARD_HTML, history=TRADE_HISTORY)
+    return render_template_string(
+        DASHBOARD_HTML, 
+        history=TRADE_HISTORY, 
+        get_status=get_api_status,
+        last_run=datetime.now().strftime("%H:%M:%S")
+    )
 
 # --- 2. SURGICAL REVERSAL ---
 def surgical_reversal(signal_type):
@@ -114,10 +135,6 @@ def mlfusion():
     try:
         strike = (round(price / 100) * 100) - 100 if signal == "BUY" else (round(price / 100) * 100) + 100
         option_type = "CE" if signal == "BUY" else "PE"
-        
-        # Note: In production, you would fetch the security_id for the specific strike/expiry here
-        # Example of adding the actual entry order with the new lot size:
-        # dhan.place_order(..., quantity=30, ...) 
 
         status_entry = {
             "price": price,
