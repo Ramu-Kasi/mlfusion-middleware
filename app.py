@@ -6,6 +6,7 @@ from flask import Flask, request, jsonify, render_template_string
 from dhanhq import dhanhq
 from datetime import datetime
 import pytz
+import threading
 
 app = Flask(__name__)
 
@@ -26,6 +27,7 @@ def log_now(msg):
 def load_scrip_master():
     global SCRIP_MASTER_DATA
     try:
+        log_now("ASYNC: Loading Scrip Master in background...")
         df = pd.read_csv(SCRIP_URL, low_memory=False)
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c.upper()), None)
         sym_col = next((c for c in df.columns if 'SYMBOL' in c.upper()), None)
@@ -45,9 +47,12 @@ def load_scrip_master():
             if exp_col:
                 SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
                 SCRIP_MASTER_DATA = SCRIP_MASTER_DATA.dropna(subset=[exp_col])
-        log_now("BOOT: Jan1-2026 Scrip Master Loaded.")
+        log_now("BOOT: Jan1-2026 Scrip Master Ready.")
     except Exception as e:
         log_now(f"BOOT ERROR: {e}")
+
+# Start loading in background so UI opens immediately
+threading.Thread(target=load_scrip_master, daemon=True).start()
 
 def get_atm_id(price, signal):
     try:
@@ -74,7 +79,7 @@ def get_atm_id(price, signal):
         return None, strike, 30
     except Exception: return None, None, 30
 
-# --- 3. DASHBOARD UI ---
+# --- 3. DASHBOARD UI (With Colors) ---
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
@@ -88,9 +93,9 @@ DASHBOARD_HTML = """
         table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; }
         th { background: #333; color: white; padding: 12px; text-align: left; }
         td { padding: 12px; border-bottom: 1px solid #eee; }
-        /* UI CUSTOMIZATION: CE/PE Colors */
-        .type-ce { color: #28a745; font-weight: bold; } 
-        .type-pe { color: #dc3545; font-weight: bold; opacity: 0.9; }
+        /* UI CUSTOMIZATION: CE/PE COLORS */
+        .ce-text { color: #28a745; font-weight: bold; }
+        .pe-text { color: #d9534f; font-weight: bold; }
     </style>
 </head>
 <body>
@@ -107,7 +112,7 @@ DASHBOARD_HTML = """
                 <td>{{ trade.time }}</td>
                 <td>{{ trade.price }}</td>
                 <td>{{ trade.strike }}</td>
-                <td class="{{ 'type-ce' if trade.type == 'CE' else 'type-pe' }}">{{ trade.type }}</td>
+                <td class="{{ 'ce-text' if trade.type == 'CE' else 'pe-text' }}">{{ trade.type }}</td>
                 <td>{{ trade.status }}</td>
                 <td>{{ trade.remarks }}</td>
             </tr>
@@ -138,18 +143,16 @@ def surgical_reversal(signal_type):
 # --- 5. ROUTES ---
 @app.route('/')
 def dashboard():
-    if SCRIP_MASTER_DATA is None: load_scrip_master()
     now_ist = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
     return render_template_string(DASHBOARD_HTML, history=TRADE_HISTORY, last_run=now_ist)
 
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
-    if SCRIP_MASTER_DATA is None: load_scrip_master()
     data = request.get_json(force=True, silent=True)
     if not data: return jsonify({"status": "no data"}), 400
     msg, price = data.get('message', '').upper(), float(data.get('price', 0))
     
-    was_reversed = surgical_reversal(msg)
+    was_rev = surgical_reversal(msg)
     time.sleep(0.5) 
     
     sec_id, strike, qty = get_atm_id(price, msg)
@@ -163,7 +166,7 @@ def mlfusion():
     curr_type = "CE" if "BUY" in msg else "PE"
     
     if order_res.get('status') == 'success':
-        remark = f"Closed {opp_type} & Opened {curr_type} {strike}" if was_reversed else f"Opened {curr_type} {strike}"
+        remark = f"Closed {opp_type} & Opened {curr_type} {strike}" if was_rev else f"Opened {curr_type} {strike}"
     else:
         remark = order_res.get('remarks', 'Entry Failed')
 
