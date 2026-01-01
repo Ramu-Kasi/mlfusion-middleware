@@ -7,7 +7,7 @@ from dhanhq import dhanhq
 from datetime import datetime
 import pytz
 
-# --- 1. INITIALIZATION ---
+# --- 1. INITIALIZATION (Speed Optimized) ---
 app = Flask(__name__)
 PORT = int(os.environ.get("PORT", 10000))
 
@@ -30,7 +30,7 @@ def load_scrip_master():
         log_now("BOOT: Fetching Scrip Master...")
         df = pd.read_csv(SCRIP_URL, low_memory=False)
         
-        # Exact Dhan Scrip Master Headers
+        # Filtering for Bank Nifty Options on NSE
         mask = (
             (df['SEM_INSTRUMENT_NAME'].str.contains('OPTIDX', na=False)) & 
             (df['SEM_SYMBOL_NAME'].str.contains('BANKNIFTY', case=False, na=False)) &
@@ -47,13 +47,14 @@ def load_scrip_master():
     except Exception as e:
         log_now(f"BOOT ERROR: {e}")
 
-# Load to RAM immediately
+# Load to RAM immediately on startup
 load_scrip_master()
 
 def get_atm_id(price, signal):
     try:
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: return None, None, 30
         
+        # 1-Strike ITM Calculation Logic
         base_strike = round(float(price) / 100) * 100
         if "BUY" in signal.upper():
             strike, opt_type = base_strike - 100, "CE"
@@ -117,7 +118,16 @@ def surgical_reversal(signal_type):
                 if "BANKNIFTY" in symbol and net_qty != 0:
                     is_call, is_put = "CE" in symbol, "PE" in symbol
                     if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
-                        dhan.place_order(security_id=pos['securityId'], exchange_segment=pos['exchangeSegment'], transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY, quantity=abs(net_qty), order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
+                        # Exit opposing position immediately
+                        dhan.place_order(
+                            security_id=pos['securityId'], 
+                            exchange_segment=pos['exchangeSegment'], 
+                            transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY, 
+                            quantity=abs(net_qty), 
+                            order_type=dhan.MARKET, 
+                            product_type=dhan.MARGIN, 
+                            price=0
+                        )
                         was_closed = True
         return was_closed
     except Exception: return False
@@ -134,26 +144,49 @@ def mlfusion():
     if not data: return jsonify({"status": "no data"}), 400
     msg, price = data.get('message', '').upper(), float(data.get('price', 0))
     
+    # 1. Close existing opposing position
     was_reversed = surgical_reversal(msg)
+    
+    # 2. Sequential Alignment Delay
     time.sleep(0.5) 
     
+    # 3. Dynamic Strike Selection
     sec_id, strike, qty = get_atm_id(price, msg)
     if not sec_id: return jsonify({"status": "error", "remarks": "Scrip ID not found"}), 404
     
-    order_res = dhan.place_order(security_id=sec_id, exchange_segment=dhan.NSE_FNO, transaction_type=dhan.BUY, quantity=qty, order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
+    # 4. Entry Order
+    order_res = dhan.place_order(
+        security_id=sec_id, 
+        exchange_segment=dhan.NSE_FNO, 
+        transaction_type=dhan.BUY, 
+        quantity=qty, 
+        order_type=dhan.MARKET, 
+        product_type=dhan.MARGIN, 
+        price=0
+    )
     
     trade_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
     curr_type = "CE" if "BUY" in msg else "PE"
     opp_type = "PE" if "BUY" in msg else "CE"
     
+    # 5. Smart Remarks & Error Capture
     if order_res.get('status') == 'success':
         remark = f"Closed {opp_type} & Opened {curr_type} {strike}" if was_reversed else f"Opened {curr_type} {strike}"
     else:
-        remark = order_res.get('remarks', 'Entry Failed')
+        # Capture specific errors like "Insufficient Margin" or "RMS Rejection"
+        remark = order_res.get('remarks', order_res.get('err_msg', 'Entry Failed'))
 
-    status_entry = {"time": trade_time, "price": price, "strike": strike, "type": curr_type, "status": "success" if order_res.get('status') == 'success' else "failure", "remarks": remark}
+    status_entry = {
+        "time": trade_time, 
+        "price": price, 
+        "strike": strike, 
+        "type": curr_type, 
+        "status": "success" if order_res.get('status') == 'success' else "failure", 
+        "remarks": remark
+    }
     TRADE_HISTORY.insert(0, status_entry)
     return jsonify(status_entry), 200
 
 if __name__ == "__main__":
+    # Immediate port binding to prevent Render deployment timeouts
     app.run(host='0.0.0.0', port=PORT)
