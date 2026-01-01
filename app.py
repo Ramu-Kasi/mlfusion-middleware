@@ -2,14 +2,15 @@ import os
 import sys
 import time
 import pandas as pd
+import threading
 from flask import Flask, request, jsonify, render_template_string
 from dhanhq import dhanhq
 from datetime import datetime
 import pytz
 
-# --- 1. INITIALIZATION (Speed Optimized) ---
+# --- 1. INITIALIZATION (Port locked to 5000) ---
 app = Flask(__name__)
-PORT = int(os.environ.get("PORT", 10000))
+PORT = 5000 
 
 CLIENT_ID = os.environ.get('DHAN_CLIENT_ID')
 ACCESS_TOKEN = os.environ.get('DHAN_ACCESS_TOKEN')
@@ -23,38 +24,39 @@ def log_now(msg):
     sys.stderr.write(f"!!! [ALGO_ENGINE]: {msg}\n")
     sys.stderr.flush()
 
-# --- 2. DYNAMIC SCRIP MASTER (Memory Optimized) ---
+# --- 2. BACKGROUND CSV LOADING (Ensures Port 5000 opens immediately) ---
 def load_scrip_master():
     global SCRIP_MASTER_DATA
     try:
-        log_now("BOOT: Fetching Scrip Master...")
+        log_now("BOOT: Background Download Started...")
+        # Download heavy CSV in separate thread
         df = pd.read_csv(SCRIP_URL, low_memory=False)
-        
-        # Filtering for Bank Nifty Options on NSE
         mask = (
             (df['SEM_INSTRUMENT_NAME'].str.contains('OPTIDX', na=False)) & 
             (df['SEM_SYMBOL_NAME'].str.contains('BANKNIFTY', case=False, na=False)) &
             (df['SEM_EXCHANGE_ID'].str.contains('NSE', case=False, na=False))
         )
-        
         SCRIP_MASTER_DATA = df[mask].copy()
-        
         if 'SEM_EXPIRY_DATE' in SCRIP_MASTER_DATA.columns:
             SCRIP_MASTER_DATA['SEM_EXPIRY_DATE'] = pd.to_datetime(SCRIP_MASTER_DATA['SEM_EXPIRY_DATE'], errors='coerce')
             SCRIP_MASTER_DATA = SCRIP_MASTER_DATA.dropna(subset=['SEM_EXPIRY_DATE'])
-            
-        log_now("BOOT: Jan1-2026 v1.2 Ready.")
+        log_now("BOOT: Background Load Complete. Engine Ready on Port 5000.")
     except Exception as e:
         log_now(f"BOOT ERROR: {e}")
 
-# Load to RAM immediately on startup
-load_scrip_master()
+# Start background thread so Flask can bind to port 5000 instantly
+threading.Thread(target=load_scrip_master).start()
 
 def get_atm_id(price, signal):
+    # Wait logic: if signal hits while still downloading, poll for 30s
+    attempts = 0
+    while SCRIP_MASTER_DATA is None and attempts < 6:
+        log_now("SIGNAL RECEIVED: Waiting for Scrip Master...")
+        time.sleep(5)
+        attempts += 1
+        
     try:
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: return None, None, 30
-        
-        # 1-Strike ITM Calculation Logic
         base_strike = round(float(price) / 100) * 100
         if "BUY" in signal.upper():
             strike, opt_type = base_strike - 100, "CE"
@@ -77,12 +79,13 @@ DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>MLFusion v1.2 (Speed Optimized)</title>
-    <meta http-equiv="refresh" content="60">
+    <title>MLFusion v1.4 (Port 5000)</title>
+    <meta http-equiv="refresh" content="30">
     <style>
         body { font-family: sans-serif; background-color: #f0f2f5; padding: 20px; }
         .status-bar { background: white; padding: 15px; border-radius: 8px; display: flex; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
         .status-active { background-color: #28a745; color: #fff; padding: 2px 10px; border-radius: 10px; font-weight: bold; }
+        .status-loading { background-color: #ffc107; color: #000; padding: 2px 10px; border-radius: 10px; font-weight: bold; }
         table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; }
         th { background: #333; color: white; padding: 12px; text-align: left; }
         td { padding: 12px; border-bottom: 1px solid #eee; }
@@ -90,10 +93,11 @@ DASHBOARD_HTML = """
 </head>
 <body>
     <div class="status-bar">
-        <b>Dhan API:</b> &nbsp; <span class="status-active">Active</span>
-        <span style="margin-left: auto;">Engine: Jan1-2026 v1.2 | IST: {{ last_run }}</span>
+        <b>Dhan API:</b> &nbsp; <span class="status-active">Active</span> &nbsp;
+        <b>Engine Status:</b> &nbsp; {% if loading %}<span class="status-loading">Downloading Data...</span>{% else %}<span class="status-active">Ready</span>{% endif %}
+        <span style="margin-left: auto;">IST: {{ last_run }}</span>
     </div>
-    <h3>Live Trade Log</h3>
+    <h3>Live Trade Log (v1.4)</h3>
     <table>
         <thead><tr><th>Time (IST)</th><th>Price</th><th>Strike</th><th>Type</th><th>Status</th><th>Remarks</th></tr></thead>
         <tbody>
@@ -118,16 +122,7 @@ def surgical_reversal(signal_type):
                 if "BANKNIFTY" in symbol and net_qty != 0:
                     is_call, is_put = "CE" in symbol, "PE" in symbol
                     if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
-                        # Exit opposing position immediately
-                        dhan.place_order(
-                            security_id=pos['securityId'], 
-                            exchange_segment=pos['exchangeSegment'], 
-                            transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY, 
-                            quantity=abs(net_qty), 
-                            order_type=dhan.MARKET, 
-                            product_type=dhan.MARGIN, 
-                            price=0
-                        )
+                        dhan.place_order(security_id=pos['securityId'], exchange_segment=pos['exchangeSegment'], transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY, quantity=abs(net_qty), order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
                         was_closed = True
         return was_closed
     except Exception: return False
@@ -136,57 +131,6 @@ def surgical_reversal(signal_type):
 @app.route('/')
 def dashboard():
     now_ist = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
-    return render_template_string(DASHBOARD_HTML, history=TRADE_HISTORY, last_run=now_ist)
+    return render_template_string(DASHBOARD_HTML, history=TRADE_HISTORY, last_run=now_ist, loading=(SCRIP_MASTER_DATA is None))
 
-@app.route('/mlfusion', methods=['POST'])
-def mlfusion():
-    data = request.get_json(force=True, silent=True)
-    if not data: return jsonify({"status": "no data"}), 400
-    msg, price = data.get('message', '').upper(), float(data.get('price', 0))
-    
-    # 1. Close existing opposing position
-    was_reversed = surgical_reversal(msg)
-    
-    # 2. Sequential Alignment Delay
-    time.sleep(0.5) 
-    
-    # 3. Dynamic Strike Selection
-    sec_id, strike, qty = get_atm_id(price, msg)
-    if not sec_id: return jsonify({"status": "error", "remarks": "Scrip ID not found"}), 404
-    
-    # 4. Entry Order
-    order_res = dhan.place_order(
-        security_id=sec_id, 
-        exchange_segment=dhan.NSE_FNO, 
-        transaction_type=dhan.BUY, 
-        quantity=qty, 
-        order_type=dhan.MARKET, 
-        product_type=dhan.MARGIN, 
-        price=0
-    )
-    
-    trade_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
-    curr_type = "CE" if "BUY" in msg else "PE"
-    opp_type = "PE" if "BUY" in msg else "CE"
-    
-    # 5. Smart Remarks & Error Capture
-    if order_res.get('status') == 'success':
-        remark = f"Closed {opp_type} & Opened {curr_type} {strike}" if was_reversed else f"Opened {curr_type} {strike}"
-    else:
-        # Capture specific errors like "Insufficient Margin" or "RMS Rejection"
-        remark = order_res.get('remarks', order_res.get('err_msg', 'Entry Failed'))
-
-    status_entry = {
-        "time": trade_time, 
-        "price": price, 
-        "strike": strike, 
-        "type": curr_type, 
-        "status": "success" if order_res.get('status') == 'success' else "failure", 
-        "remarks": remark
-    }
-    TRADE_HISTORY.insert(0, status_entry)
-    return jsonify(status_entry), 200
-
-if __name__ == "__main__":
-    # Immediate port binding to prevent Render deployment timeouts
-    app.run(host='0.0.0.0', port=PORT)
+@
