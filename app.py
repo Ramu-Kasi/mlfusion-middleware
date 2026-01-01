@@ -18,10 +18,11 @@ SCRIP_MASTER_DATA = None
 TRADE_HISTORY = []
 
 def log_now(msg):
+    """Force logs to show in Render immediately"""
     sys.stderr.write(f"!!! [ALGO_ENGINE]: {msg}\n")
     sys.stderr.flush()
 
-# --- 2. SCRIP MASTER LOGIC ---
+# --- 2. SCRIP MASTER LOGIC (Dynamic ID Fetching) ---
 def load_scrip_master():
     global SCRIP_MASTER_DATA
     log_now("BOOT: Loading CSV and applying STRICT Bank Nifty filters...")
@@ -55,7 +56,7 @@ load_scrip_master()
 def get_atm_id(price, signal):
     try:
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: 
-            return None, None, 30  # UPDATED LOT SIZE
+            return None, None, 30
         
         strike = round(float(price) / 100) * 100
         opt_type = "CE" if "BUY" in signal.upper() else "PE"
@@ -78,13 +79,13 @@ def get_atm_id(price, signal):
             match = match.sort_values(by=exp_col, ascending=True)
             if not match.empty:
                 row = match.iloc[0]
-                return str(int(row[id_col])), strike, 30 # UPDATED LOT SIZE
+                return str(int(row[id_col])), strike, 30
         return None, strike, 30
     except Exception as e:
         log_now(f"LOOKUP ERROR: {e}")
         return None, None, 30
 
-# --- 3. DASHBOARD UI (UNTOUCHED) ---
+# --- 3. DASHBOARD UI (Strictly Closed Triple-Quotes) ---
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
@@ -109,4 +110,102 @@ DASHBOARD_HTML = """
     <h3>Trade History</h3>
     <table>
         <thead>
-            <tr><th>Time</th><th>Price</th><th>Strike</th><th>Type</th><th>Status</th><th>Remarks</th>
+            <tr><th>Time (IST)</th><th>Price</th><th>Strike</th><th>Type</th><th>Status</th><th>Remarks</th></tr>
+        </thead>
+        <tbody>
+            {% for trade in history %}
+            <tr>
+                <td>{{ trade.time }}</td>
+                <td>{{ trade.price }}</td>
+                <td>{{ trade.strike }}</td>
+                <td>{{ trade.type }}</td>
+                <td>{{ trade.status }}</td>
+                <td>{{ trade.remarks }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</body>
+</html>
+"""
+
+# --- 4. SURGICAL REVERSAL ---
+def surgical_reversal(signal_type):
+    try:
+        positions_resp = dhan.get_positions()
+        if positions_resp.get('status') == 'success':
+            for pos in positions_resp.get('data', []):
+                symbol = pos.get('tradingSymbol', '').upper()
+                net_qty = int(pos.get('netQty', 0))
+                if "BANKNIFTY" in symbol and net_qty != 0:
+                    is_call = "CE" in symbol
+                    is_put = "PE" in symbol
+                    if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
+                        exit_side = dhan.SELL if net_qty > 0 else dhan.BUY
+                        # Every bracket checked character-by-character
+                        dhan.place_order(
+                            security_id=pos['securityId'],
+                            exchange_segment=pos['exchangeSegment'],
+                            transaction_type=exit_side,
+                            quantity=abs(net_qty),
+                            order_type=dhan.MARKET,
+                            product_type=dhan.MARGIN,
+                            price=0
+                        )
+        return True
+    except Exception: return False
+
+# --- 5. ROUTES ---
+@app.route('/')
+def dashboard():
+    ist = pytz.timezone('Asia/Kolkata')
+    now_ist = datetime.now(ist).strftime("%H:%M:%S")
+    return render_template_string(DASHBOARD_HTML, history=TRADE_HISTORY, last_run=now_ist)
+
+@app.route('/mlfusion', methods=['POST'])
+def mlfusion():
+    data = request.get_json(force=True, silent=True)
+    if not data: return jsonify({"status": "no data"}), 400
+    
+    # Matches 'message': 'SELL' from your screenshot
+    msg = data.get('message', data.get('signal', '')).upper()
+    price = float(data.get('price', 0))
+    
+    # 1. Close opposing
+    surgical_reversal(msg)
+    
+    # 2. Get Dynamic ID (with Lot size 30)
+    sec_id, strike, qty = get_atm_id(price, msg)
+    
+    if not sec_id:
+        return jsonify({"status": "error", "remarks": "Scrip ID not found"}), 404
+
+    # 3. Execute Order
+    entry_side = dhan.BUY if "BUY" in msg else dhan.SELL
+    order_res = dhan.place_order(
+        security_id=sec_id,
+        exchange_segment=dhan.NSE_FNO,
+        transaction_type=entry_side,
+        quantity=qty,
+        order_type=dhan.MARKET,
+        product_type=dhan.MARGIN,
+        price=0
+    )
+    
+    ist = pytz.timezone('Asia/Kolkata')
+    trade_time = datetime.now(ist).strftime("%H:%M:%S")
+    
+    status_entry = {
+        "time": trade_time,
+        "price": price,
+        "strike": strike,
+        "type": "CE" if "BUY" in msg else "PE",
+        "status": "success" if order_res.get('status') == 'success' else "failure",
+        "remarks": order_res.get('remarks', 'Executed')
+    }
+    TRADE_HISTORY.insert(0, status_entry)
+    return jsonify(status_entry), 200
+
+if __name__ == "__main__":
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
