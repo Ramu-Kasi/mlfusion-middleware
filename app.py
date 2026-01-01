@@ -22,7 +22,7 @@ def log_now(msg):
     sys.stderr.write(f"!!! [ALGO_ENGINE]: {msg}\n")
     sys.stderr.flush()
 
-# --- 2. SCRIP MASTER LOGIC ---
+# --- 2. DYNAMIC SCRIP MASTER (Memory-Optimized) ---
 def load_scrip_master():
     global SCRIP_MASTER_DATA
     try:
@@ -45,6 +45,7 @@ def load_scrip_master():
             if exp_col:
                 SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
                 SCRIP_MASTER_DATA = SCRIP_MASTER_DATA.dropna(subset=[exp_col])
+        log_now("BOOT: Jan1-2026 Scrip Master Loaded.")
     except Exception as e:
         log_now(f"BOOT ERROR: {e}")
 
@@ -53,15 +54,11 @@ load_scrip_master()
 def get_atm_id(price, signal):
     try:
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: return None, None, 30
-        
-        # --- CORE LOGIC: ITM CALCULATION ---
         base_strike = round(float(price) / 100) * 100
         if "BUY" in signal.upper():
-            strike = base_strike - 100  # ITM Call
-            opt_type = "CE"
+            strike, opt_type = base_strike - 100, "CE"
         else:
-            strike = base_strike + 100  # ITM Put
-            opt_type = "PE"
+            strike, opt_type = base_strike + 100, "PE"
             
         cols = SCRIP_MASTER_DATA.columns
         strike_col = next((c for c in cols if 'STRIKE' in c.upper()), None)
@@ -79,12 +76,12 @@ def get_atm_id(price, signal):
         return None, strike, 30
     except Exception: return None, None, 30
 
-# --- 3. DASHBOARD UI (UNTOUCHED) ---
+# --- 3. DASHBOARD UI ---
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>MLFusion Trading Bot</title>
+    <title>MLFusion Jan1-2026</title>
     <meta http-equiv="refresh" content="60">
     <style>
         body { font-family: sans-serif; background-color: #f0f2f5; padding: 20px; }
@@ -100,7 +97,7 @@ DASHBOARD_HTML = """
         <b>Dhan API Status:</b> &nbsp; <span class="status-active">Active</span>
         <span style="margin-left: auto;">Last Check: {{ last_run }} (IST)</span>
     </div>
-    <h3>Trade History</h3>
+    <h3>Trade History (Jan1-2026 Version)</h3>
     <table>
         <thead><tr><th>Time (IST)</th><th>Price</th><th>Strike</th><th>Type</th><th>Status</th><th>Remarks</th></tr></thead>
         <tbody>
@@ -123,17 +120,8 @@ def surgical_reversal(signal_type):
                 net_qty = int(pos.get('netQty', 0))
                 if "BANKNIFTY" in symbol and net_qty != 0:
                     is_call, is_put = "CE" in symbol, "PE" in symbol
-                    # Close PE on Buy signal, Close CE on Sell signal
                     if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
-                        dhan.place_order(
-                            security_id=pos['securityId'], 
-                            exchange_segment=pos['exchangeSegment'], 
-                            transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY, 
-                            quantity=abs(net_qty), 
-                            order_type=dhan.MARKET, 
-                            product_type=dhan.MARGIN, 
-                            price=0
-                        )
+                        dhan.place_order(security_id=pos['securityId'], exchange_segment=pos['exchangeSegment'], transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY, quantity=abs(net_qty), order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
         return True
     except Exception: return False
 
@@ -147,41 +135,24 @@ def dashboard():
 def mlfusion():
     data = request.get_json(force=True, silent=True)
     if not data: return jsonify({"status": "no data"}), 400
+    msg, price = data.get('message', '').upper(), float(data.get('price', 0))
     
-    msg = data.get('message', '').upper()
-    price = float(data.get('price', 0))
-    
-    # 1. Close opposing position first
     surgical_reversal(msg)
-    
-    # --- SEQUENTIAL ALIGNMENT: Wait for margin/order update ---
     time.sleep(0.5) 
     
-    # 2. Get ITM Scrip ID
     sec_id, strike, qty = get_atm_id(price, msg)
-    if not sec_id: 
-        return jsonify({"status": "error", "remarks": "Scrip ID not found"}), 404
+    if not sec_id: return jsonify({"status": "error", "remarks": "Scrip ID not found"}), 404
     
-    # 3. Open NEW ITM position (Always BUY for options entry)
-    order_res = dhan.place_order(
-        security_id=sec_id, 
-        exchange_segment=dhan.NSE_FNO, 
-        transaction_type=dhan.BUY, 
-        quantity=qty, 
-        order_type=dhan.MARKET, 
-        product_type=dhan.MARGIN, 
-        price=0
-    )
+    order_res = dhan.place_order(security_id=sec_id, exchange_segment=dhan.NSE_FNO, transaction_type=dhan.BUY, quantity=qty, order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
     
     trade_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
-    status_entry = {
-        "time": trade_time, 
-        "price": price, 
-        "strike": strike, 
-        "type": "CE" if "BUY" in msg else "PE", 
-        "status": "success" if order_res.get('status') == 'success' else "failure", 
-        "remarks": order_res.get('remarks', 'Executed')
-    }
+    
+    # Generate dynamic remark
+    opp_type = "PE" if "BUY" in msg else "CE"
+    curr_type = "CE" if "BUY" in msg else "PE"
+    remark = f"Closed {opp_type} & Opened {curr_type} {strike}" if order_res.get('status') == 'success' else order_res.get('remarks', 'Entry Failed')
+
+    status_entry = {"time": trade_time, "price": price, "strike": strike, "type": curr_type, "status": "success" if order_res.get('status') == 'success' else "failure", "remarks": remark}
     TRADE_HISTORY.insert(0, status_entry)
     return jsonify(status_entry), 200
 
