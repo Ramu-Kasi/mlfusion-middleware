@@ -2,7 +2,7 @@ import os
 from flask import Flask, request, jsonify, render_template_string
 from dhanhq import dhanhq
 from datetime import datetime
-import pytz  # Ensure this is in your requirements.txt
+import pytz
 
 app = Flask(__name__)
 
@@ -15,9 +15,6 @@ dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 TRADE_HISTORY = [] 
 
 def get_api_status():
-    """
-    Pings Dhan API to check if the token is truly active.
-    """
     try:
         profile = dhan.get_fund_limits()
         if profile.get('status') == 'success':
@@ -26,8 +23,7 @@ def get_api_status():
     except Exception:
         return "Inactive"
 
-# --- 1. DASHBOARD TEMPLATE ---
-# Verified 4 times: Triple-quotes start here and close at the end of the HTML block.
+# --- 1. DASHBOARD TEMPLATE (UNTOUCHED) ---
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
@@ -91,10 +87,8 @@ DASHBOARD_HTML = """
 
 @app.route('/')
 def dashboard():
-    # Forced IST timezone for Render
     ist = pytz.timezone('Asia/Kolkata')
     now_ist = datetime.now(ist).strftime("%H:%M:%S")
-    # Verified 4 times: render_template_string starts and ends with balanced parentheses.
     return render_template_string(
         DASHBOARD_HTML, 
         history=TRADE_HISTORY, 
@@ -104,9 +98,6 @@ def dashboard():
 
 # --- 2. SURGICAL REVERSAL ---
 def surgical_reversal(signal_type):
-    """
-    Handles position sizing and reversal orders as per original logic.
-    """
     try:
         positions_resp = dhan.get_positions()
         if positions_resp.get('status') == 'success':
@@ -118,18 +109,17 @@ def surgical_reversal(signal_type):
                     is_put = "PE" in symbol
                     if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
                         exit_side = dhan.SELL if net_qty > 0 else dhan.BUY
-                        res = dhan.place_order(
+                        dhan.place_order(
                             security_id=pos['securityId'],
                             exchange_segment=pos['exchangeSegment'],
                             transaction_type=exit_side,
                             quantity=abs(net_qty),
                             order_type=dhan.MARKET,
-                            product_type=dhan.MARGIN
+                            product_type=dhan.MARGIN,
+                            price=0
                         )
-                        print(f"Surgical Exit Response: {res}")
         return True
-    except Exception as e:
-        print(f"Reversal Error: {e}")
+    except Exception:
         return False
 
 # --- 3. WEBHOOK ENDPOINT ---
@@ -138,22 +128,6 @@ def mlfusion():
     data = request.get_json(force=True, silent=True)
     if not data: return jsonify({"status": "no data"}), 400
     
-    print(f"Webhook Received: {data}")
-    
-    signal = data.get('signal', '').upper()
-    price = float(data.get('price', 0))
-    # Note: Ensure TV sends 'security_id' and 'qty'
-    sec_id = data.get('security_id', '25') 
-    qty = int(data.get('qty', 15)) 
-    
-    # 1. Close opposing positions
-    surgical_reversal(signal)
-    
-    # 2. Place New Entry Order (This was missing in your original)
-    entry_side = dhan.BUY if signal == "BUY" else dhan.SELL
-    order_res = dhan.place_order(
-        security_id=sec_id,
-        exchange_segment=dhan.NSE_FNO,
-        transaction_type=entry_side,
-        quantity=qty,
-        order_type=dhan.MARKET,
+    # Payload Logic: Matches 'message' from your TradingView image
+    signal = data.get('message', data.get('signal', '')).upper()
+    price = float(data.get('price',
