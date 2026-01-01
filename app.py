@@ -118,16 +118,18 @@ def surgical_reversal(signal_type):
                     is_put = "PE" in symbol
                     if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
                         exit_side = dhan.SELL if net_qty > 0 else dhan.BUY
-                        dhan.place_order(
+                        res = dhan.place_order(
                             security_id=pos['securityId'],
-                            exchange_segment=dhan.NSE_FNO,
+                            exchange_segment=pos['exchangeSegment'],
                             transaction_type=exit_side,
                             quantity=abs(net_qty),
                             order_type=dhan.MARKET,
                             product_type=dhan.MARGIN
                         )
+                        print(f"Surgical Exit Response: {res}")
         return True
-    except Exception:
+    except Exception as e:
+        print(f"Reversal Error: {e}")
         return False
 
 # --- 3. WEBHOOK ENDPOINT ---
@@ -136,32 +138,22 @@ def mlfusion():
     data = request.get_json(force=True, silent=True)
     if not data: return jsonify({"status": "no data"}), 400
     
+    print(f"Webhook Received: {data}")
+    
     signal = data.get('signal', '').upper()
     price = float(data.get('price', 0))
+    # Note: Ensure TV sends 'security_id' and 'qty'
+    sec_id = data.get('security_id', '25') 
+    qty = int(data.get('qty', 15)) 
     
+    # 1. Close opposing positions
     surgical_reversal(signal)
     
-    ist = pytz.timezone('Asia/Kolkata')
-    trade_time = datetime.now(ist).strftime("%H:%M:%S")
-    
-    try:
-        strike = (round(price / 100) * 100) - 100 if signal == "BUY" else (round(price / 100) * 100) + 100
-        option_type = "CE" if signal == "BUY" else "PE"
-
-        status_entry = {
-            "time": trade_time,
-            "price": price,
-            "strike": int(strike),
-            "type": option_type,
-            "expiry": "2026-01-27",
-            "status": "success",
-            "remarks": "Reversed and Executed"
-        }
-    except Exception as e:
-        status_entry = {"time": trade_time, "price": price, "strike": "-", "type": "-", "expiry": "-", "status": "failure", "remarks": str(e)}
-
-    TRADE_HISTORY.insert(0, status_entry)
-    return jsonify(status_entry), 200
-
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    # 2. Place New Entry Order (This was missing in your original)
+    entry_side = dhan.BUY if signal == "BUY" else dhan.SELL
+    order_res = dhan.place_order(
+        security_id=sec_id,
+        exchange_segment=dhan.NSE_FNO,
+        transaction_type=entry_side,
+        quantity=qty,
+        order_type=dhan.MARKET,
