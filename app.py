@@ -22,7 +22,7 @@ def log_now(msg):
     sys.stderr.write(f"!!! [ALGO_ENGINE]: {msg}\n")
     sys.stderr.flush()
 
-# --- 2. DYNAMIC SCRIP MASTER (Memory-Optimized) ---
+# --- 2. DYNAMIC SCRIP MASTER ---
 def load_scrip_master():
     global SCRIP_MASTER_DATA
     try:
@@ -49,7 +49,7 @@ def load_scrip_master():
     except Exception as e:
         log_now(f"BOOT ERROR: {e}")
 
-load_scrip_master()
+# IMPORTANT: We load after server starts to prevent Render timeout
 
 def get_atm_id(price, signal):
     try:
@@ -112,8 +112,7 @@ DASHBOARD_HTML = """
 
 # --- 4. SURGICAL REVERSAL ---
 def surgical_reversal(signal_type):
-    # Modified to track if an actual opposite position was closed
-    reversal_occurred = False
+    was_closed = False
     try:
         positions_resp = dhan.get_positions()
         if positions_resp.get('status') == 'success':
@@ -122,25 +121,48 @@ def surgical_reversal(signal_type):
                 net_qty = int(pos.get('netQty', 0))
                 if "BANKNIFTY" in symbol and net_qty != 0:
                     is_call, is_put = "CE" in symbol, "PE" in symbol
-                    # Reversal condition
                     if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
                         dhan.place_order(security_id=pos['securityId'], exchange_segment=pos['exchangeSegment'], transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY, quantity=abs(net_qty), order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
-                        reversal_occurred = True
-        return reversal_occurred
+                        was_closed = True
+        return was_closed
     except Exception: return False
 
 # --- 5. ROUTES ---
 @app.route('/')
 def dashboard():
+    if SCRIP_MASTER_DATA is None: load_scrip_master() # Load on first access if not ready
     now_ist = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
     return render_template_string(DASHBOARD_HTML, history=TRADE_HISTORY, last_run=now_ist)
 
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
+    if SCRIP_MASTER_DATA is None: load_scrip_master()
     data = request.get_json(force=True, silent=True)
     if not data: return jsonify({"status": "no data"}), 400
     msg, price = data.get('message', '').upper(), float(data.get('price', 0))
     
-    # Check if a reversal happened
     was_reversed = surgical_reversal(msg)
-    time.sleep(0.5)
+    time.sleep(0.5) 
+    
+    sec_id, strike, qty = get_atm_id(price, msg)
+    if not sec_id: return jsonify({"status": "error", "remarks": "Scrip ID not found"}), 404
+    
+    order_res = dhan.place_order(security_id=sec_id, exchange_segment=dhan.NSE_FNO, transaction_type=dhan.BUY, quantity=qty, order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
+    
+    trade_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
+    
+    opp_type = "PE" if "BUY" in msg else "CE"
+    curr_type = "CE" if "BUY" in msg else "PE"
+    
+    if order_res.get('status') == 'success':
+        remark = f"Closed {opp_type} & Opened {curr_type} {strike}" if was_reversed else f"Opened {curr_type} {strike}"
+    else:
+        remark = order_res.get('remarks', 'Entry Failed')
+
+    status_entry = {"time": trade_time, "price": price, "strike": strike, "type": curr_type, "status": "success" if order_res.get('status') == 'success' else "failure", "remarks": remark}
+    TRADE_HISTORY.insert(0, status_entry)
+    return jsonify(status_entry), 200
+
+if __name__ == "__main__":
+    # Start server immediately to satisfy Render port scan
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
