@@ -7,8 +7,10 @@ from dhanhq import dhanhq
 from datetime import datetime
 import pytz
 
-# --- 1. INITIALIZATION (Fixed Order) ---
+# --- 1. INITIALIZATION ---
 app = Flask(__name__)
+PORT = int(os.environ.get("PORT", 10000))
+
 CLIENT_ID = os.environ.get('DHAN_CLIENT_ID')
 ACCESS_TOKEN = os.environ.get('DHAN_ACCESS_TOKEN')
 dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
@@ -21,57 +23,51 @@ def log_now(msg):
     sys.stderr.write(f"!!! [ALGO_ENGINE]: {msg}\n")
     sys.stderr.flush()
 
-# --- 2. DYNAMIC SCRIP MASTER ---
+# --- 2. DYNAMIC SCRIP MASTER (Memory Optimized) ---
 def load_scrip_master():
     global SCRIP_MASTER_DATA
     try:
+        log_now("BOOT: Fetching Scrip Master...")
         df = pd.read_csv(SCRIP_URL, low_memory=False)
-        inst_col = next((c for c in df.columns if 'INSTRUMENT' in c.upper()), None)
-        sym_col = next((c for c in df.columns if 'SYMBOL' in c.upper()), None)
-        exch_col = next((c for c in df.columns if 'EXCHANGE' in c.upper()), None)
-        exp_col = next((c for c in df.columns if 'EXPIRY_DATE' in c.upper()), None)
         
-        if inst_col and sym_col:
-            mask = (
-                (df[inst_col].str.contains('OPTIDX', na=False)) & 
-                (df[sym_col].str.contains('BANKNIFTY', case=False, na=False)) &
-                (~df[sym_col].str.contains('BANKEX', case=False, na=False))
-            )
-            if exch_col:
-                mask = mask & (df[exch_col].str.contains('NSE', case=False, na=False))
-
-            SCRIP_MASTER_DATA = df[mask].copy()
-            if exp_col:
-                SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
-                SCRIP_MASTER_DATA = SCRIP_MASTER_DATA.dropna(subset=[exp_col])
-        log_now("BOOT: Jan1-2026 v1.1 Scrip Master Loaded.")
+        # Exact Dhan Scrip Master Headers
+        mask = (
+            (df['SEM_INSTRUMENT_NAME'].str.contains('OPTIDX', na=False)) & 
+            (df['SEM_SYMBOL_NAME'].str.contains('BANKNIFTY', case=False, na=False)) &
+            (df['SEM_EXCHANGE_ID'].str.contains('NSE', case=False, na=False))
+        )
+        
+        SCRIP_MASTER_DATA = df[mask].copy()
+        
+        if 'SEM_EXPIRY_DATE' in SCRIP_MASTER_DATA.columns:
+            SCRIP_MASTER_DATA['SEM_EXPIRY_DATE'] = pd.to_datetime(SCRIP_MASTER_DATA['SEM_EXPIRY_DATE'], errors='coerce')
+            SCRIP_MASTER_DATA = SCRIP_MASTER_DATA.dropna(subset=['SEM_EXPIRY_DATE'])
+            
+        log_now("BOOT: Jan1-2026 v1.2 Ready.")
     except Exception as e:
         log_now(f"BOOT ERROR: {e}")
 
+# Load to RAM immediately
 load_scrip_master()
 
 def get_atm_id(price, signal):
     try:
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: return None, None, 30
+        
         base_strike = round(float(price) / 100) * 100
         if "BUY" in signal.upper():
             strike, opt_type = base_strike - 100, "CE"
         else:
             strike, opt_type = base_strike + 100, "PE"
             
-        cols = SCRIP_MASTER_DATA.columns
-        strike_col = next((c for c in cols if 'STRIKE' in c.upper()), None)
-        type_col = next((c for c in cols if 'OPTION_TYPE' in c.upper()), None)
-        exp_col = next((c for c in cols if 'EXPIRY_DATE' in c.upper()), None)
-        id_col = next((c for c in cols if 'SMST_SECURITY_ID' in c.upper()), 
-                     next((c for c in cols if 'TOKEN' in c.upper()), None))
-
-        match = SCRIP_MASTER_DATA[(SCRIP_MASTER_DATA[strike_col] == strike) & (SCRIP_MASTER_DATA[type_col] == opt_type)].copy()
+        match = SCRIP_MASTER_DATA[(SCRIP_MASTER_DATA['SEM_STRIKE_PRICE'] == strike) & 
+                                  (SCRIP_MASTER_DATA['SEM_OPTION_TYPE'] == opt_type)].copy()
+        
         if not match.empty:
             today = pd.Timestamp(datetime.now().date())
-            match = match[match[exp_col] >= today].sort_values(by=exp_col, ascending=True)
+            match = match[match['SEM_EXPIRY_DATE'] >= today].sort_values(by='SEM_EXPIRY_DATE', ascending=True)
             if not match.empty:
-                return str(int(match.iloc[0][id_col])), strike, 30
+                return str(int(match.iloc[0]['SEM_SMST_SECURITY_ID'])), strike, 30
         return None, strike, 30
     except Exception: return None, None, 30
 
@@ -80,7 +76,7 @@ DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>MLFusion Jan1-2026 v1.1</title>
+    <title>MLFusion v1.2 (Speed Optimized)</title>
     <meta http-equiv="refresh" content="60">
     <style>
         body { font-family: sans-serif; background-color: #f0f2f5; padding: 20px; }
@@ -93,10 +89,10 @@ DASHBOARD_HTML = """
 </head>
 <body>
     <div class="status-bar">
-        <b>Dhan API Status:</b> &nbsp; <span class="status-active">Active</span>
-        <span style="margin-left: auto;">Last Check: {{ last_run }} (IST)</span>
+        <b>Dhan API:</b> &nbsp; <span class="status-active">Active</span>
+        <span style="margin-left: auto;">Engine: Jan1-2026 v1.2 | IST: {{ last_run }}</span>
     </div>
-    <h3>Trade History (Jan1-2026 v1.1)</h3>
+    <h3>Live Trade Log</h3>
     <table>
         <thead><tr><th>Time (IST)</th><th>Price</th><th>Strike</th><th>Type</th><th>Status</th><th>Remarks</th></tr></thead>
         <tbody>
@@ -109,7 +105,7 @@ DASHBOARD_HTML = """
 </html>
 """
 
-# --- 4. SURGICAL REVERSAL (Returns True if position was actually closed) ---
+# --- 4. SURGICAL REVERSAL ---
 def surgical_reversal(signal_type):
     was_closed = False
     try:
@@ -121,15 +117,7 @@ def surgical_reversal(signal_type):
                 if "BANKNIFTY" in symbol and net_qty != 0:
                     is_call, is_put = "CE" in symbol, "PE" in symbol
                     if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
-                        dhan.place_order(
-                            security_id=pos['securityId'], 
-                            exchange_segment=pos['exchangeSegment'], 
-                            transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY, 
-                            quantity=abs(net_qty), 
-                            order_type=dhan.MARKET, 
-                            product_type=dhan.MARGIN, 
-                            price=0
-                        )
+                        dhan.place_order(security_id=pos['securityId'], exchange_segment=pos['exchangeSegment'], transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY, quantity=abs(net_qty), order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
                         was_closed = True
         return was_closed
     except Exception: return False
@@ -146,51 +134,26 @@ def mlfusion():
     if not data: return jsonify({"status": "no data"}), 400
     msg, price = data.get('message', '').upper(), float(data.get('price', 0))
     
-    # 1. Surgical Reversal
     was_reversed = surgical_reversal(msg)
-    
-    # 2. Sequential Delay
     time.sleep(0.5) 
     
-    # 3. Get ITM Scrip
     sec_id, strike, qty = get_atm_id(price, msg)
     if not sec_id: return jsonify({"status": "error", "remarks": "Scrip ID not found"}), 404
     
-    # 4. Entry Order
-    order_res = dhan.place_order(
-        security_id=sec_id, 
-        exchange_segment=dhan.NSE_FNO, 
-        transaction_type=dhan.BUY, 
-        quantity=qty, 
-        order_type=dhan.MARKET, 
-        product_type=dhan.MARGIN, 
-        price=0
-    )
+    order_res = dhan.place_order(security_id=sec_id, exchange_segment=dhan.NSE_FNO, transaction_type=dhan.BUY, quantity=qty, order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
     
     trade_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
-    
-    # Smart Remarks Generation
     curr_type = "CE" if "BUY" in msg else "PE"
     opp_type = "PE" if "BUY" in msg else "CE"
     
     if order_res.get('status') == 'success':
-        if was_reversed:
-            remark = f"Closed {opp_type} & Opened {curr_type} {strike}"
-        else:
-            remark = f"Opened {curr_type} {strike}"
+        remark = f"Closed {opp_type} & Opened {curr_type} {strike}" if was_reversed else f"Opened {curr_type} {strike}"
     else:
         remark = order_res.get('remarks', 'Entry Failed')
 
-    status_entry = {
-        "time": trade_time, 
-        "price": price, 
-        "strike": strike, 
-        "type": curr_type, 
-        "status": "success" if order_res.get('status') == 'success' else "failure", 
-        "remarks": remark
-    }
+    status_entry = {"time": trade_time, "price": price, "strike": strike, "type": curr_type, "status": "success" if order_res.get('status') == 'success' else "failure", "remarks": remark}
     TRADE_HISTORY.insert(0, status_entry)
     return jsonify(status_entry), 200
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    app.run(host='0.0.0.0', port=PORT)
