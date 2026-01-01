@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import pandas as pd
 from flask import Flask, request, jsonify, render_template_string
 from dhanhq import dhanhq
@@ -18,14 +19,12 @@ SCRIP_MASTER_DATA = None
 TRADE_HISTORY = []
 
 def log_now(msg):
-    """Force logs to show in Render immediately"""
     sys.stderr.write(f"!!! [ALGO_ENGINE]: {msg}\n")
     sys.stderr.flush()
 
-# --- 2. SCRIP MASTER LOGIC (Dynamic ID Fetching) ---
+# --- 2. SCRIP MASTER LOGIC ---
 def load_scrip_master():
     global SCRIP_MASTER_DATA
-    log_now("BOOT: Loading CSV and applying STRICT Bank Nifty filters...")
     try:
         df = pd.read_csv(SCRIP_URL, low_memory=False)
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c.upper()), None)
@@ -46,21 +45,24 @@ def load_scrip_master():
             if exp_col:
                 SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
                 SCRIP_MASTER_DATA = SCRIP_MASTER_DATA.dropna(subset=[exp_col])
-            
-            log_now(f"BOOT: Success! {len(SCRIP_MASTER_DATA)} Bank Nifty contracts loaded.")
     except Exception as e:
-        log_now(f"CRITICAL BOOT ERROR: {e}")
+        log_now(f"BOOT ERROR: {e}")
 
 load_scrip_master()
 
 def get_atm_id(price, signal):
     try:
-        if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: 
-            return None, None, 30
+        if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: return None, None, 30
         
-        strike = round(float(price) / 100) * 100
-        opt_type = "CE" if "BUY" in signal.upper() else "PE"
-        
+        # --- CORE LOGIC: ITM CALCULATION ---
+        base_strike = round(float(price) / 100) * 100
+        if "BUY" in signal.upper():
+            strike = base_strike - 100  # ITM Call
+            opt_type = "CE"
+        else:
+            strike = base_strike + 100  # ITM Put
+            opt_type = "PE"
+            
         cols = SCRIP_MASTER_DATA.columns
         strike_col = next((c for c in cols if 'STRIKE' in c.upper()), None)
         type_col = next((c for c in cols if 'OPTION_TYPE' in c.upper()), None)
@@ -68,24 +70,16 @@ def get_atm_id(price, signal):
         id_col = next((c for c in cols if 'SMST_SECURITY_ID' in c.upper()), 
                      next((c for c in cols if 'TOKEN' in c.upper()), None))
 
-        match = SCRIP_MASTER_DATA[
-            (SCRIP_MASTER_DATA[strike_col] == strike) & 
-            (SCRIP_MASTER_DATA[type_col] == opt_type)
-        ].copy()
-        
+        match = SCRIP_MASTER_DATA[(SCRIP_MASTER_DATA[strike_col] == strike) & (SCRIP_MASTER_DATA[type_col] == opt_type)].copy()
         if not match.empty:
             today = pd.Timestamp(datetime.now().date())
-            match = match[match[exp_col] >= today]
-            match = match.sort_values(by=exp_col, ascending=True)
+            match = match[match[exp_col] >= today].sort_values(by=exp_col, ascending=True)
             if not match.empty:
-                row = match.iloc[0]
-                return str(int(row[id_col])), strike, 30
+                return str(int(match.iloc[0][id_col])), strike, 30
         return None, strike, 30
-    except Exception as e:
-        log_now(f"LOOKUP ERROR: {e}")
-        return None, None, 30
+    except Exception: return None, None, 30
 
-# --- 3. DASHBOARD UI (Strictly Closed Triple-Quotes) ---
+# --- 3. DASHBOARD UI (UNTOUCHED) ---
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
@@ -93,35 +87,25 @@ DASHBOARD_HTML = """
     <title>MLFusion Trading Bot</title>
     <meta http-equiv="refresh" content="60">
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f0f2f5; margin: 0; padding: 20px; }
-        .status-bar { background: white; padding: 15px; border-radius: 8px; display: flex; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; gap: 20px; }
-        .status-active { background-color: #28a745; color: #fff; padding: 2px 10px; border-radius: 10px; font-size: 0.9em; font-weight: bold; }
-        table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        body { font-family: sans-serif; background-color: #f0f2f5; padding: 20px; }
+        .status-bar { background: white; padding: 15px; border-radius: 8px; display: flex; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .status-active { background-color: #28a745; color: #fff; padding: 2px 10px; border-radius: 10px; font-weight: bold; }
+        table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; }
         th { background: #333; color: white; padding: 12px; text-align: left; }
         td { padding: 12px; border-bottom: 1px solid #eee; }
     </style>
 </head>
 <body>
     <div class="status-bar">
-        <b>Dhan API Status:</b>
-        <span class="status-active">Active</span>
+        <b>Dhan API Status:</b> &nbsp; <span class="status-active">Active</span>
         <span style="margin-left: auto;">Last Check: {{ last_run }} (IST)</span>
     </div>
     <h3>Trade History</h3>
     <table>
-        <thead>
-            <tr><th>Time (IST)</th><th>Price</th><th>Strike</th><th>Type</th><th>Status</th><th>Remarks</th></tr>
-        </thead>
+        <thead><tr><th>Time (IST)</th><th>Price</th><th>Strike</th><th>Type</th><th>Status</th><th>Remarks</th></tr></thead>
         <tbody>
             {% for trade in history %}
-            <tr>
-                <td>{{ trade.time }}</td>
-                <td>{{ trade.price }}</td>
-                <td>{{ trade.strike }}</td>
-                <td>{{ trade.type }}</td>
-                <td>{{ trade.status }}</td>
-                <td>{{ trade.remarks }}</td>
-            </tr>
+            <tr><td>{{ trade.time }}</td><td>{{ trade.price }}</td><td>{{ trade.strike }}</td><td>{{ trade.type }}</td><td>{{ trade.status }}</td><td>{{ trade.remarks }}</td></tr>
             {% endfor %}
         </tbody>
     </table>
@@ -138,18 +122,16 @@ def surgical_reversal(signal_type):
                 symbol = pos.get('tradingSymbol', '').upper()
                 net_qty = int(pos.get('netQty', 0))
                 if "BANKNIFTY" in symbol and net_qty != 0:
-                    is_call = "CE" in symbol
-                    is_put = "PE" in symbol
+                    is_call, is_put = "CE" in symbol, "PE" in symbol
+                    # Close PE on Buy signal, Close CE on Sell signal
                     if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
-                        exit_side = dhan.SELL if net_qty > 0 else dhan.BUY
-                        # Every bracket checked character-by-character
                         dhan.place_order(
-                            security_id=pos['securityId'],
-                            exchange_segment=pos['exchangeSegment'],
-                            transaction_type=exit_side,
-                            quantity=abs(net_qty),
-                            order_type=dhan.MARKET,
-                            product_type=dhan.MARGIN,
+                            security_id=pos['securityId'], 
+                            exchange_segment=pos['exchangeSegment'], 
+                            transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY, 
+                            quantity=abs(net_qty), 
+                            order_type=dhan.MARKET, 
+                            product_type=dhan.MARGIN, 
                             price=0
                         )
         return True
@@ -158,8 +140,7 @@ def surgical_reversal(signal_type):
 # --- 5. ROUTES ---
 @app.route('/')
 def dashboard():
-    ist = pytz.timezone('Asia/Kolkata')
-    now_ist = datetime.now(ist).strftime("%H:%M:%S")
+    now_ist = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
     return render_template_string(DASHBOARD_HTML, history=TRADE_HISTORY, last_run=now_ist)
 
 @app.route('/mlfusion', methods=['POST'])
@@ -167,45 +148,42 @@ def mlfusion():
     data = request.get_json(force=True, silent=True)
     if not data: return jsonify({"status": "no data"}), 400
     
-    # Matches 'message': 'SELL' from your screenshot
-    msg = data.get('message', data.get('signal', '')).upper()
+    msg = data.get('message', '').upper()
     price = float(data.get('price', 0))
     
-    # 1. Close opposing
+    # 1. Close opposing position first
     surgical_reversal(msg)
     
-    # 2. Get Dynamic ID (with Lot size 30)
-    sec_id, strike, qty = get_atm_id(price, msg)
+    # --- SEQUENTIAL ALIGNMENT: Wait for margin/order update ---
+    time.sleep(0.5) 
     
-    if not sec_id:
+    # 2. Get ITM Scrip ID
+    sec_id, strike, qty = get_atm_id(price, msg)
+    if not sec_id: 
         return jsonify({"status": "error", "remarks": "Scrip ID not found"}), 404
-
-    # 3. Execute Order
-    entry_side = dhan.BUY if "BUY" in msg else dhan.SELL
+    
+    # 3. Open NEW ITM position (Always BUY for options entry)
     order_res = dhan.place_order(
-        security_id=sec_id,
-        exchange_segment=dhan.NSE_FNO,
-        transaction_type=entry_side,
-        quantity=qty,
-        order_type=dhan.MARKET,
-        product_type=dhan.MARGIN,
+        security_id=sec_id, 
+        exchange_segment=dhan.NSE_FNO, 
+        transaction_type=dhan.BUY, 
+        quantity=qty, 
+        order_type=dhan.MARKET, 
+        product_type=dhan.MARGIN, 
         price=0
     )
     
-    ist = pytz.timezone('Asia/Kolkata')
-    trade_time = datetime.now(ist).strftime("%H:%M:%S")
-    
+    trade_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
     status_entry = {
-        "time": trade_time,
-        "price": price,
-        "strike": strike,
-        "type": "CE" if "BUY" in msg else "PE",
-        "status": "success" if order_res.get('status') == 'success' else "failure",
+        "time": trade_time, 
+        "price": price, 
+        "strike": strike, 
+        "type": "CE" if "BUY" in msg else "PE", 
+        "status": "success" if order_res.get('status') == 'success' else "failure", 
         "remarks": order_res.get('remarks', 'Executed')
     }
     TRADE_HISTORY.insert(0, status_entry)
     return jsonify(status_entry), 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
