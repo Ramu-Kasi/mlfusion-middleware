@@ -97,37 +97,4 @@ def dashboard():
     )
 
 # --- 2. SURGICAL REVERSAL ---
-def surgical_reversal(signal_type):
-    try:
-        positions_resp = dhan.get_positions()
-        if positions_resp.get('status') == 'success':
-            for pos in positions_resp.get('data', []):
-                symbol = pos.get('tradingSymbol', '').upper()
-                net_qty = int(pos.get('netQty', 0))
-                if "BANKNIFTY" in symbol and net_qty != 0:
-                    is_call = "CE" in symbol
-                    is_put = "PE" in symbol
-                    if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
-                        exit_side = dhan.SELL if net_qty > 0 else dhan.BUY
-                        dhan.place_order(
-                            security_id=pos['securityId'],
-                            exchange_segment=pos['exchangeSegment'],
-                            transaction_type=exit_side,
-                            quantity=abs(net_qty),
-                            order_type=dhan.MARKET,
-                            product_type=dhan.MARGIN,
-                            price=0
-                        )
-        return True
-    except Exception:
-        return False
-
-# --- 3. WEBHOOK ENDPOINT ---
-@app.route('/mlfusion', methods=['POST'])
-def mlfusion():
-    data = request.get_json(force=True, silent=True)
-    if not data: return jsonify({"status": "no data"}), 400
-    
-    # Payload Logic: Matches 'message' from your TradingView image
-    signal = data.get('message', data.get('signal', '')).upper()
-    price = float(data.get('price',
+def surgical_reversal(signal
