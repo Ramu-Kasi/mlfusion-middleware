@@ -20,25 +20,22 @@ def log_now(msg):
     sys.stderr.write(f"!!! [ALGO_ENGINE]: {msg}\n")
     sys.stderr.flush()
 
-# --- 2. STABLE SCRIP LOADING (No Threading) ---
+# --- 2. STABLE DATA LOADING ---
 def load_scrip_master():
     global SCRIP_MASTER_DATA
     try:
-        log_now("BOOT: Loading Scrip Master (Stable Mode)...")
+        log_now("BOOT: Loading Scrip Master...")
         df = pd.read_csv(SCRIP_URL, low_memory=False)
-        
-        # Using the standard Dhan columns from v1.0
         mask = (
             (df['SEM_INSTRUMENT_NAME'].str.contains('OPTIDX', na=False)) & 
             (df['SEM_SYMBOL_NAME'].str.contains('BANKNIFTY', case=False, na=False)) &
             (df['SEM_EXCHANGE_ID'].str.contains('NSE', case=False, na=False))
         )
         SCRIP_MASTER_DATA = df[mask].copy()
-        log_now(f"BOOT: Engine Ready. Scrips Loaded: {len(SCRIP_MASTER_DATA)}")
+        log_now(f"BOOT: Ready. Scrips Found: {len(SCRIP_MASTER_DATA)}")
     except Exception as e:
         log_now(f"BOOT ERROR: {e}")
 
-# Forced load before server start
 load_scrip_master()
 
 def get_atm_id(price, signal):
@@ -56,7 +53,7 @@ def get_atm_id(price, signal):
         return None, strike
     except: return None, None
 
-# --- 3. REVERSAL LOGIC (v1.0 Standard) ---
+# --- 3. STABLE REVERSAL LOGIC ---
 def surgical_reversal():
     try:
         pos = dhan.get_positions()
@@ -74,7 +71,7 @@ def surgical_reversal():
                     )
     except: pass
 
-# --- 4. ROUTES ---
+# --- 4. DASHBOARD UI ---
 @app.route('/')
 def dashboard():
     now_ist = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
@@ -89,6 +86,7 @@ def dashboard():
         {% endfor %}
     </table></body></html>""", history=TRADE_HISTORY, last_run=now_ist)
 
+# --- 5. EXECUTION ROUTE ---
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
     data = request.get_json(force=True, silent=True)
@@ -96,11 +94,9 @@ def mlfusion():
     
     msg, price = data.get('message', '').upper(), float(data.get('price', 0))
     
-    # 1. Close current
     surgical_reversal()
     time.sleep(1)
     
-    # 2. Open new
     sec_id, strike = get_atm_id(price, msg)
     if not sec_id: return jsonify({"status": "error"}), 404
     
