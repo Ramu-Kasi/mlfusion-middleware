@@ -49,8 +49,6 @@ def load_scrip_master():
     except Exception as e:
         log_now(f"BOOT ERROR: {e}")
 
-# IMPORTANT: We load after server starts to prevent Render timeout
-
 def get_atm_id(price, signal):
     try:
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: return None, None, 30
@@ -90,6 +88,9 @@ DASHBOARD_HTML = """
         table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; }
         th { background: #333; color: white; padding: 12px; text-align: left; }
         td { padding: 12px; border-bottom: 1px solid #eee; }
+        /* UI CUSTOMIZATION: CE/PE Colors */
+        .type-ce { color: #28a745; font-weight: bold; } 
+        .type-pe { color: #dc3545; font-weight: bold; opacity: 0.9; }
     </style>
 </head>
 <body>
@@ -102,7 +103,14 @@ DASHBOARD_HTML = """
         <thead><tr><th>Time (IST)</th><th>Price</th><th>Strike</th><th>Type</th><th>Status</th><th>Remarks</th></tr></thead>
         <tbody>
             {% for trade in history %}
-            <tr><td>{{ trade.time }}</td><td>{{ trade.price }}</td><td>{{ trade.strike }}</td><td>{{ trade.type }}</td><td>{{ trade.status }}</td><td>{{ trade.remarks }}</td></tr>
+            <tr>
+                <td>{{ trade.time }}</td>
+                <td>{{ trade.price }}</td>
+                <td>{{ trade.strike }}</td>
+                <td class="{{ 'type-ce' if trade.type == 'CE' else 'type-pe' }}">{{ trade.type }}</td>
+                <td>{{ trade.status }}</td>
+                <td>{{ trade.remarks }}</td>
+            </tr>
             {% endfor %}
         </tbody>
     </table>
@@ -130,7 +138,7 @@ def surgical_reversal(signal_type):
 # --- 5. ROUTES ---
 @app.route('/')
 def dashboard():
-    if SCRIP_MASTER_DATA is None: load_scrip_master() # Load on first access if not ready
+    if SCRIP_MASTER_DATA is None: load_scrip_master()
     now_ist = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
     return render_template_string(DASHBOARD_HTML, history=TRADE_HISTORY, last_run=now_ist)
 
@@ -164,5 +172,4 @@ def mlfusion():
     return jsonify(status_entry), 200
 
 if __name__ == "__main__":
-    # Start server immediately to satisfy Render port scan
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
