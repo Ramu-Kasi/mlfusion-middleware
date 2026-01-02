@@ -17,42 +17,67 @@ dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
 SCRIP_MASTER_DATA = None
+BN_EXPIRIES = []
+
 TRADE_HISTORY = []
-OPEN_TRADE_REF = None  # <-- tracks current open trade
+OPEN_TRADE_REF = None
 
 def log_now(msg):
     sys.stderr.write(f"!!! [ALGO_ENGINE]: {msg}\n")
     sys.stderr.flush()
 
-# --- 2. DYNAMIC SCRIP MASTER ---
+# --- 2. LOAD SCRIP MASTER ---
 def load_scrip_master():
     global SCRIP_MASTER_DATA
     try:
         df = pd.read_csv(SCRIP_URL, low_memory=False)
-        inst_col = next((c for c in df.columns if 'INSTRUMENT' in c.upper()), None)
-        sym_col = next((c for c in df.columns if 'SYMBOL' in c.upper()), None)
-        exch_col = next((c for c in df.columns if 'EXCHANGE' in c.upper()), None)
-        exp_col = next((c for c in df.columns if 'EXPIRY_DATE' in c.upper()), None)
 
-        if inst_col and sym_col:
+        inst_col = next((c for c in df.columns if 'INSTRUMENT' in c.upper()), None)
+        sym_col  = next((c for c in df.columns if 'SYMBOL' in c.upper()), None)
+        exch_col = next((c for c in df.columns if 'EXCHANGE' in c.upper()), None)
+        exp_col  = next((c for c in df.columns if 'EXPIRY_DATE' in c.upper()), None)
+
+        if inst_col and sym_col and exp_col:
             mask = (
-                (df[inst_col].str.contains('OPTIDX', na=False)) &
-                (df[sym_col].str.contains('BANKNIFTY', case=False, na=False)) &
-                (~df[sym_col].str.contains('BANKEX', case=False, na=False))
+                df[inst_col].str.contains('OPTIDX', na=False) &
+                df[sym_col].str.contains('BANKNIFTY', case=False, na=False) &
+                ~df[sym_col].str.contains('BANKEX', case=False, na=False)
             )
+
             if exch_col:
                 mask &= df[exch_col].str.contains('NSE', case=False, na=False)
 
             SCRIP_MASTER_DATA = df[mask].copy()
-            if exp_col:
-                SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
-                SCRIP_MASTER_DATA.dropna(subset=[exp_col], inplace=True)
+            SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
+            SCRIP_MASTER_DATA.dropna(subset=[exp_col], inplace=True)
+
+            refresh_bn_expiries()
 
     except Exception as e:
         log_now(f"SCRIP LOAD ERROR: {e}")
 
 threading.Thread(target=load_scrip_master, daemon=True).start()
 
+# --- 3. EXPIRY UTILITIES ---
+def refresh_bn_expiries():
+    global BN_EXPIRIES
+    try:
+        exp_col = next(c for c in SCRIP_MASTER_DATA.columns if 'EXPIRY_DATE' in c.upper())
+        BN_EXPIRIES = sorted(SCRIP_MASTER_DATA[exp_col].unique())
+    except Exception as e:
+        log_now(f"EXPIRY REFRESH ERROR: {e}")
+
+def get_current_and_next_expiry():
+    today = datetime.now(pytz.timezone('Asia/Kolkata')).date()
+    future = [e for e in BN_EXPIRIES if e.date() >= today]
+
+    if len(future) >= 2:
+        return future[0], future[1]
+    elif len(future) == 1:
+        return future[0], future[0]
+    return None, None
+
+# --- 4. ATM CONTRACT SELECTION (WITH ROLLOVER) ---
 def get_atm_id(price, signal):
     try:
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty:
@@ -63,19 +88,30 @@ def get_atm_id(price, signal):
 
         cols = SCRIP_MASTER_DATA.columns
         strike_col = next(c for c in cols if 'STRIKE' in c.upper())
-        type_col = next(c for c in cols if 'OPTION_TYPE' in c.upper())
-        exp_col = next(c for c in cols if 'EXPIRY_DATE' in c.upper())
-        id_col = next(c for c in cols if 'SECURITY' in c.upper() or 'TOKEN' in c.upper())
+        type_col   = next(c for c in cols if 'OPTION_TYPE' in c.upper())
+        exp_col    = next(c for c in cols if 'EXPIRY_DATE' in c.upper())
+        id_col     = next(c for c in cols if 'SECURITY' in c.upper() or 'TOKEN' in c.upper())
+
+        curr_exp, next_exp = get_current_and_next_expiry()
+        today = datetime.now(pytz.timezone('Asia/Kolkata')).date()
+
+        selected_exp = curr_exp
+        if curr_exp:
+            dte = (curr_exp.date() - today).days
+            if dte <= 5 and next_exp:
+                selected_exp = next_exp
 
         match = SCRIP_MASTER_DATA[
             (SCRIP_MASTER_DATA[strike_col] == strike) &
-            (SCRIP_MASTER_DATA[type_col] == opt_type)
-        ].sort_values(exp_col)
+            (SCRIP_MASTER_DATA[type_col] == opt_type) &
+            (SCRIP_MASTER_DATA[exp_col] == selected_exp)
+        ]
 
         if not match.empty:
             return str(int(match.iloc[0][id_col])), strike, 30
 
         return None, strike, 30
+
     except Exception:
         return None, None, 30
 
@@ -140,7 +176,7 @@ def fetch_price(security_id):
     except Exception:
         return None
 
-# --- REVERSAL WITH EXIT UPDATE ---
+# --- REVERSAL HANDLING ---
 def surgical_reversal(signal):
     global OPEN_TRADE_REF
     try:
@@ -184,10 +220,11 @@ def mlfusion():
     msg = data['message'].upper()
     price = float(data['price'])
 
-    was_rev = surgical_reversal(msg)
+    surgical_reversal(msg)
+
     sec_id, strike, qty = get_atm_id(price, msg)
 
-    order = dhan.place_order(
+    dhan.place_order(
         security_id=sec_id,
         exchange_segment=dhan.NSE_FNO,
         transaction_type=dhan.BUY,
