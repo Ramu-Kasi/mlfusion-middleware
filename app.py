@@ -20,8 +20,7 @@ SCRIP_MASTER_DATA = None
 TRADE_HISTORY = []
 
 def log_now(msg):
-    # Render logs capture stderr more reliably for real-time debugging
-    sys.stderr.write(f"!!! [ALGO_ENGINE_DEBUG]: {msg}\n")
+    sys.stderr.write(f"!!! [ALGO_ENGINE]: {msg}\n")
     sys.stderr.flush()
 
 # --- 2. DYNAMIC SCRIP MASTER ---
@@ -153,11 +152,62 @@ def surgical_reversal(signal_type, exit_price):
                 if "BANKNIFTY" in symbol and net_qty != 0:
                     is_call, is_put = "CE" in symbol, "PE" in symbol
                     if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
-                        log_now(f"REVERSAL: Closing {symbol} Qty {net_qty}")
-                        dhan.place_order(security_id=pos['securityId'], exchange_segment=pos['exchangeSegment'], transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY, quantity=abs(net_qty), order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
+                        dhan.place_order(security_id=pos['security_id'], exchange_segment=pos['exchange_segment'], transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY, quantity=abs(net_qty), order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
                         
                         for trade in TRADE_HISTORY:
                             if trade['status'] == 'OPEN' and (trade['type'] in symbol):
                                 trade['status'] = 'CLOSED'
                                 trade['exit'] = exit_price
-                                trade
+                                trade['pnl'] = round((exit_price - trade['entry']) * abs(net_qty), 2)
+                        was_closed = True
+        return was_closed
+    except Exception as e:
+        log_now(f"REVERSAL ERROR: {e}")
+        return False
+
+# --- 5. ROUTES ---
+@app.route('/')
+def dashboard():
+    now_ist = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
+    return render_template_string(DASHBOARD_HTML, history=TRADE_HISTORY, last_run=now_ist)
+
+@app.route('/mlfusion', methods=['POST'])
+def mlfusion():
+    raw_payload = request.get_data(as_text=True)
+    log_now(f"RAW PAYLOAD: {raw_payload}")
+    
+    try:
+        data = request.get_json(force=True)
+    except Exception as e:
+        log_now(f"JSON ERROR: {e}")
+        return jsonify({"status": "error", "remarks": "Invalid JSON"}), 400
+
+    if not data: return jsonify({"status": "no data"}), 400
+    msg, price = data.get('message', '').upper(), float(data.get('price', 0))
+    
+    was_rev = surgical_reversal(msg, price)
+    time.sleep(0.5) 
+    
+    sec_id, strike, qty = get_atm_id(price, msg)
+    if not sec_id: return jsonify({"status": "error", "remarks": "Scrip ID not found"}), 404
+    
+    order_res = dhan.place_order(security_id=sec_id, exchange_segment=dhan.NSE_FNO, transaction_type=dhan.BUY, quantity=qty, order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
+    
+    trade_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
+    curr_type = "CE" if "BUY" in msg else "PE"
+    opp_type = "PE" if "BUY" in msg else "CE"
+    
+    if order_res.get('status') == 'success':
+        remark = f"Closed {opp_type} & Opened {curr_type} {strike}" if was_rev else f"Opened {curr_type} {strike}"
+        status_entry = {
+            "time": trade_time, "price": price, "strike": strike, "type": curr_type, 
+            "lots": int(qty/15), "premium": round(price * qty, 2), "entry": price, 
+            "exit": "-", "status": "OPEN", "pnl": 0.0, "remarks": remark
+        }
+        TRADE_HISTORY.insert(0, status_entry)
+        return jsonify(status_entry), 200
+    
+    return jsonify({"status": "failed", "remarks": order_res.get('remarks', 'Entry Failed')}), 400
+
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
