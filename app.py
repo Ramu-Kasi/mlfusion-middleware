@@ -22,6 +22,8 @@ BN_EXPIRIES = []
 TRADE_HISTORY = []
 OPEN_TRADE_REF = None
 
+IST = pytz.timezone("Asia/Kolkata")
+
 def log_now(msg):
     sys.stderr.write(f"!!! [ALGO_ENGINE]: {msg}\n")
     sys.stderr.flush()
@@ -58,13 +60,12 @@ def load_scrip_master():
     except Exception as e:
         log_now(f"SCRIP LOAD ERROR: {e}")
 
-# initial load
 threading.Thread(target=load_scrip_master, daemon=True).start()
 
 # --- DAILY AUTO REFRESH (24 HOURS) ---
 def periodic_scrip_refresh():
     while True:
-        time.sleep(24 * 60 * 60)  # 24 hours
+        time.sleep(24 * 60 * 60)
         load_scrip_master()
 
 threading.Thread(target=periodic_scrip_refresh, daemon=True).start()
@@ -79,21 +80,31 @@ def refresh_bn_expiries():
         log_now(f"EXPIRY REFRESH ERROR: {e}")
 
 def get_current_and_next_expiry():
-    today = datetime.now(pytz.timezone('Asia/Kolkata')).date()
+    today = datetime.now(IST).date()
     future = [e for e in BN_EXPIRIES if e.date() >= today]
 
     if len(future) >= 2:
         return future[0], future[1]
     elif len(future) == 1:
         return future[0], future[0]
-    else:
-        return None, None
+    return None, None
+
+def get_active_expiry_details():
+    curr, nxt = get_current_and_next_expiry()
+    if not curr:
+        return "—", None
+
+    today = datetime.now(IST).date()
+    dte = (curr.date() - today).days
+    active = nxt if dte <= 5 else curr
+
+    return active.strftime("%d-%b-%Y"), dte
 
 # --- ATM CONTRACT SELECTION ---
 def get_atm_id(price, signal):
     try:
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty:
-            return None, None, 30
+            return None, None, 30, "—"
 
         base = round(price / 100) * 100
         strike, opt_type = (base - 100, "CE") if "BUY" in signal else (base + 100, "PE")
@@ -104,29 +115,34 @@ def get_atm_id(price, signal):
         exp_col    = next(c for c in cols if 'EXPIRY_DATE' in c.upper())
         id_col     = next(c for c in cols if 'SECURITY' in c.upper() or 'TOKEN' in c.upper())
 
-        curr_exp, next_exp = get_current_and_next_expiry()
-        today = datetime.now(pytz.timezone('Asia/Kolkata')).date()
+        curr, nxt = get_current_and_next_expiry()
+        today = datetime.now(IST).date()
 
-        selected_exp = curr_exp
-        if curr_exp:
-            dte = (curr_exp.date() - today).days
-            if dte <= 5 and next_exp:
-                selected_exp = next_exp
+        selected = curr
+        if curr:
+            dte = (curr.date() - today).days
+            if dte <= 5 and nxt:
+                selected = nxt
 
         match = SCRIP_MASTER_DATA[
             (SCRIP_MASTER_DATA[strike_col] == strike) &
             (SCRIP_MASTER_DATA[type_col] == opt_type) &
-            (SCRIP_MASTER_DATA[exp_col] == selected_exp)
+            (SCRIP_MASTER_DATA[exp_col] == selected)
         ]
 
         if not match.empty:
-            return str(int(match.iloc[0][id_col])), strike, 30
+            return (
+                str(int(match.iloc[0][id_col])),
+                strike,
+                30,
+                selected.strftime("%d-%b-%Y")
+            )
 
-        return None, strike, 30
+        return None, strike, 30, "—"
 
     except Exception as e:
         log_now(f"ATM ERROR: {e}")
-        return None, None, 30
+        return None, None, 30, "—"
 
 # --- PRICE FETCH ---
 def fetch_price(security_id):
@@ -172,8 +188,17 @@ def surgical_reversal(signal):
 # --- ROUTES ---
 @app.route('/')
 def dashboard():
-    now = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
-    return render_template_string(DASHBOARD_HTML, history=TRADE_HISTORY, last_run=now)
+    now = datetime.now(IST).strftime("%H:%M:%S")
+    expiry, dte = get_active_expiry_details()
+    danger = dte is not None and dte <= 5
+
+    return render_template_string(
+        DASHBOARD_HTML,
+        history=TRADE_HISTORY,
+        last_run=now,
+        active_expiry=expiry,
+        expiry_danger=danger
+    )
 
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
@@ -184,7 +209,7 @@ def mlfusion():
 
     surgical_reversal(msg)
 
-    sec_id, strike, qty = get_atm_id(price, msg)
+    sec_id, strike, qty, expiry_used = get_atm_id(price, msg)
 
     order_resp = dhan.place_order(
         security_id=sec_id,
@@ -199,10 +224,11 @@ def mlfusion():
     success = order_resp.get("status") == "success"
 
     trade = {
-        "time": datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S"),
+        "time": datetime.now(IST).strftime("%H:%M:%S"),
         "price": price,
         "strike": strike,
         "type": "CE" if "BUY" in msg else "PE",
+        "expiry_used": expiry_used,
         "lot_size": qty,
         "premium_paid": "—",
         "entry_price": "—",
@@ -220,16 +246,18 @@ def mlfusion():
     TRADE_HISTORY.insert(0, trade)
     return jsonify(trade), 200
 
-# --- UI (UNCHANGED) ---
+# --- UI ---
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html>
 <head>
-<title>MLFusion Jan1-2026</title>
+<title>MLFusion Jan2-2026</title>
 <meta http-equiv="refresh" content="60">
 <style>
 body{font-family:sans-serif;background:#f0f2f5;padding:20px}
-.status-bar{background:#fff;padding:15px;border-radius:8px;display:flex;box-shadow:0 1px 3px rgba(0,0,0,.1);margin-bottom:20px}
+.status-bar{background:#fff;padding:15px;border-radius:8px;display:flex;gap:25px;box-shadow:0 1px 3px rgba(0,0,0,.1);margin-bottom:20px}
 .status-active{background:#28a745;color:#fff;padding:2px 10px;border-radius:10px;font-weight:bold}
+.expiry-safe{color:#222;font-weight:bold}
+.expiry-danger{color:#d9534f;font-weight:bold}
 table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px}
 th{background:#333;color:#fff;padding:12px;text-align:left}
 td{padding:12px;border-bottom:1px solid #eee}
@@ -239,16 +267,20 @@ td{padding:12px;border-bottom:1px solid #eee}
 </head>
 <body>
 <div class="status-bar">
-<b>Dhan API Status:</b>&nbsp;<span class="status-active">Active</span>
-<span style="margin-left:auto">Last Check: {{ last_run }} (IST)</span>
+<b>Dhan API:</b><span class="status-active">Active</span>
+<b>Active BN Expiry:</b>
+<span class="{{ 'expiry-danger' if expiry_danger else 'expiry-safe' }}">
+{{ active_expiry }}
+</span>
+<span style="margin-left:auto">Last Check: {{ last_run }} IST</span>
 </div>
 
-<h3>Trade History (Jan1-2026 Version)</h3>
+<h3>Trade History</h3>
 <table>
 <thead>
 <tr>
 <th>Time</th><th>Price</th><th>Strike</th><th>Type</th>
-<th>Lot Size</th><th>Premium Paid</th>
+<th>Expiry Used</th><th>Lot Size</th><th>Premium Paid</th>
 <th>Entry Price</th><th>Exit Price</th>
 <th>Status</th><th>Remarks</th>
 </tr>
@@ -258,6 +290,7 @@ td{padding:12px;border-bottom:1px solid #eee}
 <tr>
 <td>{{t.time}}</td><td>{{t.price}}</td><td>{{t.strike}}</td>
 <td class="{{'ce-text' if t.type=='CE' else 'pe-text'}}">{{t.type}}</td>
+<td>{{t.expiry_used}}</td>
 <td>{{t.lot_size}}</td><td>{{t.premium_paid}}</td>
 <td>{{t.entry_price}}</td><td>{{t.exit_price}}</td>
 <td>{{t.status}}</td><td>{{t.remarks}}</td>
