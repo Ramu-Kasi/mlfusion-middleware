@@ -47,15 +47,27 @@ def load_scrip_master():
             mask &= df[exch_col].str.contains('NSE', case=False, na=False)
 
         SCRIP_MASTER_DATA = df[mask].copy()
-        SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
+        SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(
+            SCRIP_MASTER_DATA[exp_col], errors='coerce'
+        )
         SCRIP_MASTER_DATA.dropna(subset=[exp_col], inplace=True)
 
         refresh_bn_expiries()
+        log_now("Scrip master loaded / refreshed")
 
     except Exception as e:
         log_now(f"SCRIP LOAD ERROR: {e}")
 
+# initial load
 threading.Thread(target=load_scrip_master, daemon=True).start()
+
+# --- DAILY AUTO REFRESH (24 HOURS) ---
+def periodic_scrip_refresh():
+    while True:
+        time.sleep(24 * 60 * 60)  # 24 hours
+        load_scrip_master()
+
+threading.Thread(target=periodic_scrip_refresh, daemon=True).start()
 
 # --- EXPIRY UTILITIES ---
 def refresh_bn_expiries():
