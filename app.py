@@ -62,17 +62,20 @@ def get_atm_id(price, signal):
     try:
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty:
             return None, None, FIXED_QTY
+        
         base_strike = round(float(price) / 100) * 100
         if "BUY" in signal.upper():
             strike, opt_type = base_strike - 100, "CE"
         else:
             strike, opt_type = base_strike + 100, "PE"
+            
         cols = SCRIP_MASTER_DATA.columns
         strike_col = next((c for c in cols if 'STRIKE' in c.upper()), None)
         type_col = next((c for c in cols if 'OPTION_TYPE' in c.upper()), None)
         exp_col = next((c for c in cols if 'EXPIRY_DATE' in c.upper()), None)
         id_col = next((c for c in cols if 'SMST_SECURITY_ID' in c.upper()), 
                      next((c for c in cols if 'TOKEN' in c.upper()), None))
+
         match = SCRIP_MASTER_DATA[(SCRIP_MASTER_DATA[strike_col] == strike) & (SCRIP_MASTER_DATA[type_col] == opt_type)].copy()
         if not match.empty:
             today = pd.Timestamp(datetime.now().date())
@@ -90,63 +93,4 @@ DASHBOARD_HTML = """
 <head>
     <title>MLFusion - Jan 2026</title>
     <style>
-        body { font-family: sans-serif; background: #f0f2f5; padding: 20px; }
-        table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; }
-        th, td { padding: 12px; border-bottom: 1px solid #eee; text-align: left; }
-        th { background: #333; color: white; }
-    </style>
-</head>
-<body>
-    <h3>Trade History (BN Qty: 30)</h3>
-    <table>
-        <thead>
-            <tr><th>Time (IST)</th><th>Price</th><th>Strike</th><th>Type</th><th>Qty</th><th>Status</th><th>Remarks</th></tr>
-        </thead>
-        <tbody>
-            {% for trade in history %}
-            <tr>
-                <td>{{ trade.time }}</td><td>{{ trade.price }}</td><td>{{ trade.strike }}</td>
-                <td>{{ trade.type }}</td><td>{{ trade.total_qty }}</td><td>{{ trade.status }}</td><td>{{ trade.remarks }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</body>
-</html>
-"""
-
-# --- 4. SURGICAL REVERSAL ---
-def surgical_reversal(signal_type, current_price):
-    try:
-        positions_resp = dhan.get_positions()
-        if positions_resp.get('status') == 'success':
-            for pos in positions_resp.get('data', []):
-                symbol = pos.get('tradingSymbol', '').upper()
-                net_qty = int(pos.get('netQty', 0))
-                if "BANKNIFTY" in symbol and net_qty != 0:
-                    is_call, is_put = "CE" in symbol, "PE" in symbol
-                    if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
-                        dhan.place_order(security_id=pos['securityId'], exchange_segment=pos['exchangeSegment'], transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY, quantity=abs(net_qty), order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
-                        for trade in TRADE_HISTORY:
-                            if trade['status'] == 'OPEN' and (trade['type'] in symbol):
-                                trade['status'] = 'CLOSED'
-                        return True
-        return False
-    except Exception: return False
-
-# --- 5. ROUTES ---
-@app.route('/')
-def dashboard():
-    now_ist = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
-    return render_template_string(DASHBOARD_HTML, history=TRADE_HISTORY, last_run=now_ist)
-
-@app.route('/mlfusion', methods=['POST'])
-def mlfusion():
-    data = request.get_json(force=True, silent=True)
-    if not data: return jsonify({"status": "no data"}), 400
-    msg, price = data.get('message', '').upper(), float(data.get('price', 0))
-    was_rev = surgical_reversal(msg, price)
-    time.sleep(0.5) 
-    sec_id, strike, qty = get_atm_id(price, msg) 
-    if not sec_id: return jsonify({"status": "error"}), 404
-    order_res = dhan.place_order(security_id=sec_id, exchange_segment=dhan.NSE_FNO,
+        body { font-family: sans-serif; background: #
