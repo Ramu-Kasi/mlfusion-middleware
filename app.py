@@ -93,4 +93,14 @@ DASHBOARD_HTML = """
 <head>
     <title>MLFusion - Jan 2026</title>
     <style>
-        body { font-family: sans-serif; background: #
+        body { font-family: sans-serif; background: #f0f2f5; padding: 20px; }
+        table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; }
+        th, td { padding: 12px; border-bottom: 1px solid #eee; text-align: left; }
+        th { background: #333; color: white; }
+    </style>
+</head>
+<body>
+    <h3>Trade History (BN Qty: 30)</h3>
+    <table>
+        <thead>
+            <tr><th>Time (IST)</th><th>Price</th><th>Strike</th><th>Type</th><th>Qty</th><th>Status</th><th>Remarks
