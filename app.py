@@ -18,6 +18,7 @@ dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
 SCRIP_MASTER_DATA = None
 TRADE_HISTORY = []
+OPEN_TRADE_REF = None  # <-- tracks current open trade
 
 def log_now(msg):
     sys.stderr.write(f"!!! [ALGO_ENGINE]: {msg}\n")
@@ -27,7 +28,6 @@ def log_now(msg):
 def load_scrip_master():
     global SCRIP_MASTER_DATA
     try:
-        log_now("ASYNC: Loading Scrip Master in background...")
         df = pd.read_csv(SCRIP_URL, low_memory=False)
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c.upper()), None)
         sym_col = next((c for c in df.columns if 'SYMBOL' in c.upper()), None)
@@ -41,16 +41,15 @@ def load_scrip_master():
                 (~df[sym_col].str.contains('BANKEX', case=False, na=False))
             )
             if exch_col:
-                mask = mask & (df[exch_col].str.contains('NSE', case=False, na=False))
+                mask &= df[exch_col].str.contains('NSE', case=False, na=False)
 
             SCRIP_MASTER_DATA = df[mask].copy()
             if exp_col:
                 SCRIP_MASTER_DATA[exp_col] = pd.to_datetime(SCRIP_MASTER_DATA[exp_col], errors='coerce')
-                SCRIP_MASTER_DATA = SCRIP_MASTER_DATA.dropna(subset=[exp_col])
+                SCRIP_MASTER_DATA.dropna(subset=[exp_col], inplace=True)
 
-        log_now("BOOT: Jan1-2026 Scrip Master Ready.")
     except Exception as e:
-        log_now(f"BOOT ERROR: {e}")
+        log_now(f"SCRIP LOAD ERROR: {e}")
 
 threading.Thread(target=load_scrip_master, daemon=True).start()
 
@@ -59,145 +58,136 @@ def get_atm_id(price, signal):
         if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty:
             return None, None, 30
 
-        base_strike = round(float(price) / 100) * 100
-        if "BUY" in signal.upper():
-            strike, opt_type = base_strike - 100, "CE"
-        else:
-            strike, opt_type = base_strike + 100, "PE"
+        base = round(price / 100) * 100
+        strike, opt_type = (base - 100, "CE") if "BUY" in signal else (base + 100, "PE")
 
         cols = SCRIP_MASTER_DATA.columns
-        strike_col = next((c for c in cols if 'STRIKE' in c.upper()), None)
-        type_col = next((c for c in cols if 'OPTION_TYPE' in c.upper()), None)
-        exp_col = next((c for c in cols if 'EXPIRY_DATE' in c.upper()), None)
-        id_col = next((c for c in cols if 'SMST_SECURITY_ID' in c.upper()),
-                      next((c for c in cols if 'TOKEN' in c.upper()), None))
+        strike_col = next(c for c in cols if 'STRIKE' in c.upper())
+        type_col = next(c for c in cols if 'OPTION_TYPE' in c.upper())
+        exp_col = next(c for c in cols if 'EXPIRY_DATE' in c.upper())
+        id_col = next(c for c in cols if 'SECURITY' in c.upper() or 'TOKEN' in c.upper())
 
         match = SCRIP_MASTER_DATA[
             (SCRIP_MASTER_DATA[strike_col] == strike) &
             (SCRIP_MASTER_DATA[type_col] == opt_type)
-        ].copy()
+        ].sort_values(exp_col)
 
         if not match.empty:
-            today = pd.Timestamp(datetime.now().date())
-            match = match[match[exp_col] >= today].sort_values(by=exp_col)
-            if not match.empty:
-                return str(int(match.iloc[0][id_col])), strike, 30
+            return str(int(match.iloc[0][id_col])), strike, 30
 
         return None, strike, 30
     except Exception:
         return None, None, 30
 
-# --- 3. DASHBOARD UI (UNCHANGED STYLING) ---
-DASHBOARD_HTML = """
-<!DOCTYPE html>
+# --- UI (UNCHANGED) ---
+DASHBOARD_HTML = """<!DOCTYPE html>
 <html>
 <head>
-    <title>MLFusion Jan1-2026</title>
-    <meta http-equiv="refresh" content="60">
-    <style>
-        body { font-family: sans-serif; background-color: #f0f2f5; padding: 20px; }
-        .status-bar { background: white; padding: 15px; border-radius: 8px; display: flex; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        .status-active { background-color: #28a745; color: #fff; padding: 2px 10px; border-radius: 10px; font-weight: bold; }
-        table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; }
-        th { background: #333; color: white; padding: 12px; text-align: left; }
-        td { padding: 12px; border-bottom: 1px solid #eee; }
-        .ce-text { color: #28a745; font-weight: bold; }
-        .pe-text { color: #d9534f; font-weight: bold; }
-    </style>
+<title>MLFusion Jan1-2026</title>
+<meta http-equiv="refresh" content="60">
+<style>
+body{font-family:sans-serif;background:#f0f2f5;padding:20px}
+.status-bar{background:#fff;padding:15px;border-radius:8px;display:flex;box-shadow:0 1px 3px rgba(0,0,0,.1);margin-bottom:20px}
+.status-active{background:#28a745;color:#fff;padding:2px 10px;border-radius:10px;font-weight:bold}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px}
+th{background:#333;color:#fff;padding:12px;text-align:left}
+td{padding:12px;border-bottom:1px solid #eee}
+.ce-text{color:#28a745;font-weight:bold}
+.pe-text{color:#d9534f;font-weight:bold}
+</style>
 </head>
 <body>
-    <div class="status-bar">
-        <b>Dhan API Status:</b> &nbsp; <span class="status-active">Active</span>
-        <span style="margin-left: auto;">Last Check: {{ last_run }} (IST)</span>
-    </div>
+<div class="status-bar">
+<b>Dhan API Status:</b>&nbsp;<span class="status-active">Active</span>
+<span style="margin-left:auto">Last Check: {{ last_run }} (IST)</span>
+</div>
 
-    <h3>Trade History (Jan1-2026 Version)</h3>
-
-    <table>
-        <thead>
-            <tr>
-                <th>Time (IST)</th>
-                <th>Price</th>
-                <th>Strike</th>
-                <th>Type</th>
-                <th>Lot Size</th>
-                <th>Premium Paid</th>
-                <th>Entry Price</th>
-                <th>Exit Price</th>
-                <th>Status</th>
-                <th>Remarks</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for trade in history %}
-            <tr>
-                <td>{{ trade.time }}</td>
-                <td>{{ trade.price }}</td>
-                <td>{{ trade.strike }}</td>
-                <td class="{{ 'ce-text' if trade.type == 'CE' else 'pe-text' }}">{{ trade.type }}</td>
-                <td>{{ trade.lot_size }}</td>
-                <td>{{ trade.premium_paid }}</td>
-                <td>{{ trade.entry_price }}</td>
-                <td>{{ trade.exit_price }}</td>
-                <td>{{ trade.status }}</td>
-                <td>{{ trade.remarks }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+<h3>Trade History (Jan1-2026 Version)</h3>
+<table>
+<thead>
+<tr>
+<th>Time</th><th>Price</th><th>Strike</th><th>Type</th>
+<th>Lot Size</th><th>Premium Paid</th>
+<th>Entry Price</th><th>Exit Price</th>
+<th>Status</th><th>Remarks</th>
+</tr>
+</thead>
+<tbody>
+{% for t in history %}
+<tr>
+<td>{{t.time}}</td><td>{{t.price}}</td><td>{{t.strike}}</td>
+<td class="{{'ce-text' if t.type=='CE' else 'pe-text'}}">{{t.type}}</td>
+<td>{{t.lot_size}}</td><td>{{t.premium_paid}}</td>
+<td>{{t.entry_price}}</td><td>{{t.exit_price}}</td>
+<td>{{t.status}}</td><td>{{t.remarks}}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
 </body>
-</html>
-"""
+</html>"""
 
-# --- 4. SURGICAL REVERSAL (UNCHANGED) ---
-def surgical_reversal(signal_type):
-    was_closed = False
+# --- PRICE FETCH ---
+def fetch_price(security_id):
     try:
-        positions_resp = dhan.get_positions()
-        if positions_resp.get('status') == 'success':
-            for pos in positions_resp.get('data', []):
-                symbol = pos.get('tradingSymbol', '').upper()
-                net_qty = int(pos.get('netQty', 0))
-                if "BANKNIFTY" in symbol and net_qty != 0:
-                    is_call, is_put = "CE" in symbol, "PE" in symbol
-                    if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
-                        dhan.place_order(
-                            security_id=pos['securityId'],
-                            exchange_segment=pos['exchangeSegment'],
-                            transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY,
-                            quantity=abs(net_qty),
-                            order_type=dhan.MARKET,
-                            product_type=dhan.MARGIN,
-                            price=0
-                        )
-                        was_closed = True
-        return was_closed
+        time.sleep(0.6)
+        tb = dhan.get_trade_book()
+        if tb.get('status') != 'success':
+            return None
+        for t in reversed(tb['data']):
+            if str(t['securityId']) == str(security_id):
+                return float(t['tradedPrice'])
+    except Exception:
+        return None
+
+# --- REVERSAL WITH EXIT UPDATE ---
+def surgical_reversal(signal):
+    global OPEN_TRADE_REF
+    try:
+        pos = dhan.get_positions()
+        if pos.get('status') != 'success':
+            return False
+
+        for p in pos['data']:
+            if "BANKNIFTY" in p['tradingSymbol'] and int(p['netQty']) != 0:
+                dhan.place_order(
+                    security_id=p['securityId'],
+                    exchange_segment=p['exchangeSegment'],
+                    transaction_type=dhan.SELL,
+                    quantity=abs(int(p['netQty'])),
+                    order_type=dhan.MARKET,
+                    product_type=dhan.MARGIN,
+                    price=0
+                )
+
+                exit_price = fetch_price(p['securityId'])
+
+                if OPEN_TRADE_REF:
+                    OPEN_TRADE_REF['exit_price'] = exit_price or "—"
+                    OPEN_TRADE_REF['status'] = "CLOSED"
+                    OPEN_TRADE_REF = None
+                return True
+        return False
     except Exception:
         return False
 
-# --- 5. ROUTES ---
+# --- ROUTES ---
 @app.route('/')
 def dashboard():
-    now_ist = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
-    return render_template_string(DASHBOARD_HTML, history=TRADE_HISTORY, last_run=now_ist)
+    now = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
+    return render_template_string(DASHBOARD_HTML, history=TRADE_HISTORY, last_run=now)
 
 @app.route('/mlfusion', methods=['POST'])
 def mlfusion():
-    data = request.get_json(force=True, silent=True)
-    if not data:
-        return jsonify({"status": "no data"}), 400
-
-    msg = data.get('message', '').upper()
-    price = float(data.get('price', 0))
+    global OPEN_TRADE_REF
+    data = request.get_json(force=True)
+    msg = data['message'].upper()
+    price = float(data['price'])
 
     was_rev = surgical_reversal(msg)
-    time.sleep(0.5)
-
     sec_id, strike, qty = get_atm_id(price, msg)
-    if not sec_id:
-        return jsonify({"status": "error", "remarks": "Scrip ID not found"}), 404
 
-    order_res = dhan.place_order(
+    order = dhan.place_order(
         security_id=sec_id,
         exchange_segment=dhan.NSE_FNO,
         transaction_type=dhan.BUY,
@@ -207,33 +197,26 @@ def mlfusion():
         price=0
     )
 
-    trade_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
+    entry_price = fetch_price(sec_id)
+    premium = round(entry_price * qty, 2) if entry_price else "—"
 
-    opp_type = "PE" if "BUY" in msg else "CE"
-    curr_type = "CE" if "BUY" in msg else "PE"
-
-    if order_res.get('status') == 'success':
-        remark = f"Closed {opp_type} & Opened {curr_type} {strike}" if was_rev else f"Opened {curr_type} {strike}"
-    else:
-        remark = order_res.get('remarks', 'Entry Failed')
-
-    entry_price = order_res.get('data', {}).get('price', "—")
-
-    status_entry = {
-        "time": trade_time,
+    trade = {
+        "time": datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S"),
         "price": price,
         "strike": strike,
-        "type": curr_type,
+        "type": "CE" if "BUY" in msg else "PE",
         "lot_size": qty,
-        "premium_paid": entry_price,
-        "entry_price": entry_price,
+        "premium_paid": premium,
+        "entry_price": entry_price or "—",
         "exit_price": "—",
-        "status": "success" if order_res.get('status') == 'success' else "failure",
-        "remarks": remark
+        "status": "OPEN",
+        "remarks": f"Opened {strike}"
     }
 
-    TRADE_HISTORY.insert(0, status_entry)
-    return jsonify(status_entry), 200
+    TRADE_HISTORY.insert(0, trade)
+    OPEN_TRADE_REF = trade
+
+    return jsonify(trade), 200
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
