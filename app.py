@@ -55,7 +55,7 @@ threading.Thread(target=load_scrip_master, daemon=True).start()
 
 def get_atm_id(price, signal):
     try:
-        if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: return None, None, 15
+        if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: return None, None, 30
         base_strike = round(float(price) / 100) * 100
         if "BUY" in signal.upper():
             strike, opt_type = base_strike - 100, "CE"
@@ -74,9 +74,9 @@ def get_atm_id(price, signal):
             today = pd.Timestamp(datetime.now().date())
             match = match[match[exp_col] >= today].sort_values(by=exp_col, ascending=True)
             if not match.empty:
-                return str(int(match.iloc[0][id_col])), strike, 15
-        return None, strike, 15
-    except Exception: return None, None, 15
+                return str(int(match.iloc[0][id_col])), strike, 30
+        return None, strike, 30
+    except Exception: return None, None, 30
 
 # --- 3. DASHBOARD UI ---
 DASHBOARD_HTML = """
@@ -105,17 +105,8 @@ DASHBOARD_HTML = """
     <table>
         <thead>
             <tr>
-                <th>Time (IST)</th>
-                <th>Price</th>
-                <th>Strike</th>
-                <th>Type</th>
-                <th>Lots</th>
-                <th>Premium Paid</th>
-                <th>Entry Price</th>
-                <th>Exit Price</th>
-                <th>Status</th>
-                <th>PnL</th>
-                <th>Remarks</th>
+                <th>Time (IST)</th><th>Price</th><th>Strike</th><th>Type</th>
+                <th>Lots</th><th>Premium Paid</th><th>Entry Price</th><th>Exit Price</th><th>Status</th><th>PnL</th><th>Remarks</th>
             </tr>
         </thead>
         <tbody>
@@ -146,68 +137,4 @@ def surgical_reversal(signal_type, exit_price):
     try:
         positions_resp = dhan.get_positions()
         if positions_resp.get('status') == 'success':
-            for pos in positions_resp.get('data', []):
-                symbol = pos.get('tradingSymbol', '').upper()
-                net_qty = int(pos.get('netQty', 0))
-                if "BANKNIFTY" in symbol and net_qty != 0:
-                    is_call, is_put = "CE" in symbol, "PE" in symbol
-                    if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
-                        dhan.place_order(security_id=pos['security_id'], exchange_segment=pos['exchange_segment'], transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY, quantity=abs(net_qty), order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
-                        
-                        for trade in TRADE_HISTORY:
-                            if trade['status'] == 'OPEN' and (trade['type'] in symbol):
-                                trade['status'] = 'CLOSED'
-                                trade['exit'] = exit_price
-                                trade['pnl'] = round((exit_price - trade['entry']) * abs(net_qty), 2)
-                        was_closed = True
-        return was_closed
-    except Exception as e:
-        log_now(f"REVERSAL ERROR: {e}")
-        return False
-
-# --- 5. ROUTES ---
-@app.route('/')
-def dashboard():
-    now_ist = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
-    return render_template_string(DASHBOARD_HTML, history=TRADE_HISTORY, last_run=now_ist)
-
-@app.route('/mlfusion', methods=['POST'])
-def mlfusion():
-    raw_payload = request.get_data(as_text=True)
-    log_now(f"RAW PAYLOAD: {raw_payload}")
-    
-    try:
-        data = request.get_json(force=True)
-    except Exception as e:
-        log_now(f"JSON ERROR: {e}")
-        return jsonify({"status": "error", "remarks": "Invalid JSON"}), 400
-
-    if not data: return jsonify({"status": "no data"}), 400
-    msg, price = data.get('message', '').upper(), float(data.get('price', 0))
-    
-    was_rev = surgical_reversal(msg, price)
-    time.sleep(0.5) 
-    
-    sec_id, strike, qty = get_atm_id(price, msg)
-    if not sec_id: return jsonify({"status": "error", "remarks": "Scrip ID not found"}), 404
-    
-    order_res = dhan.place_order(security_id=sec_id, exchange_segment=dhan.NSE_FNO, transaction_type=dhan.BUY, quantity=qty, order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
-    
-    trade_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
-    curr_type = "CE" if "BUY" in msg else "PE"
-    opp_type = "PE" if "BUY" in msg else "CE"
-    
-    if order_res.get('status') == 'success':
-        remark = f"Closed {opp_type} & Opened {curr_type} {strike}" if was_rev else f"Opened {curr_type} {strike}"
-        status_entry = {
-            "time": trade_time, "price": price, "strike": strike, "type": curr_type, 
-            "lots": int(qty/15), "premium": round(price * qty, 2), "entry": price, 
-            "exit": "-", "status": "OPEN", "pnl": 0.0, "remarks": remark
-        }
-        TRADE_HISTORY.insert(0, status_entry)
-        return jsonify(status_entry), 200
-    
-    return jsonify({"status": "failed", "remarks": order_res.get('remarks', 'Entry Failed')}), 400
-
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+            for pos in positions
