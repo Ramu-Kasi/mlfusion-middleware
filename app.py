@@ -55,86 +55,11 @@ threading.Thread(target=load_scrip_master, daemon=True).start()
 
 def get_atm_id(price, signal):
     try:
-        if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: return None, None, 30
+        if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: return None, None, 15
         base_strike = round(float(price) / 100) * 100
         if "BUY" in signal.upper():
             strike, opt_type = base_strike - 100, "CE"
         else:
             strike, opt_type = base_strike + 100, "PE"
             
-        cols = SCRIP_MASTER_DATA.columns
-        strike_col = next((c for c in cols if 'STRIKE' in c.upper()), None)
-        type_col = next((c for c in cols if 'OPTION_TYPE' in c.upper()), None)
-        exp_col = next((c for c in cols if 'EXPIRY_DATE' in c.upper()), None)
-        id_col = next((c for c in cols if 'SMST_SECURITY_ID' in c.upper()), 
-                     next((c for c in cols if 'TOKEN' in c.upper()), None))
-
-        match = SCRIP_MASTER_DATA[(SCRIP_MASTER_DATA[strike_col] == strike) & (SCRIP_MASTER_DATA[type_col] == opt_type)].copy()
-        if not match.empty:
-            today = pd.Timestamp(datetime.now().date())
-            match = match[match[exp_col] >= today].sort_values(by=exp_col, ascending=True)
-            if not match.empty:
-                return str(int(match.iloc[0][id_col])), strike, 30
-        return None, strike, 30
-    except Exception: return None, None, 30
-
-# --- 3. DASHBOARD UI ---
-DASHBOARD_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>MLFusion Jan1-2026</title>
-    <meta http-equiv="refresh" content="60">
-    <style>
-        body { font-family: sans-serif; background-color: #f0f2f5; padding: 20px; }
-        .status-bar { background: white; padding: 15px; border-radius: 8px; display: flex; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        .status-active { background-color: #28a745; color: #fff; padding: 2px 10px; border-radius: 10px; font-weight: bold; }
-        table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; }
-        th { background: #333; color: white; padding: 12px; text-align: left; }
-        td { padding: 12px; border-bottom: 1px solid #eee; }
-        .ce-text { color: #28a745; font-weight: bold; }
-        .pe-text { color: #d9534f; font-weight: bold; }
-    </style>
-</head>
-<body>
-    <div class="status-bar">
-        <b>Dhan API Status:</b> &nbsp; <span class="status-active">Active</span>
-        <span style="margin-left: auto;">Last Check: {{ last_run }} (IST)</span>
-    </div>
-    <h3>Trade History (Jan1-2026 Version)</h3>
-    <table>
-        <thead>
-            <tr>
-                <th>Time (IST)</th><th>Price</th><th>Strike</th><th>Type</th>
-                <th>Lots</th><th>Premium Paid</th><th>Entry Price</th><th>Exit Price</th><th>Status</th><th>PnL</th><th>Remarks</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for trade in history %}
-            <tr>
-                <td>{{ trade.time }}</td>
-                <td>{{ trade.price }}</td>
-                <td>{{ trade.strike }}</td>
-                <td class="{{ 'ce-text' if trade.type == 'CE' else 'pe-text' }}">{{ trade.type }}</td>
-                <td>{{ trade.lots }}</td>
-                <td>{{ trade.premium }}</td>
-                <td>{{ trade.entry }}</td>
-                <td>{{ trade.exit }}</td>
-                <td style="font-weight:bold; color: {{ 'orange' if trade.status == 'OPEN' else 'blue' }}">{{ trade.status }}</td>
-                <td style="color: {{ 'green' if trade.pnl >= 0 else 'red' }}">{{ trade.pnl }}</td>
-                <td>{{ trade.remarks }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</body>
-</html>
-"""
-
-# --- 4. SURGICAL REVERSAL ---
-def surgical_reversal(signal_type, exit_price):
-    was_closed = False
-    try:
-        positions_resp = dhan.get_positions()
-        if positions_resp.get('status') == 'success':
-            for pos in positions
+        cols = SCRIP
