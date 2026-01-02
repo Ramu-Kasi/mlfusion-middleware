@@ -6,12 +6,12 @@ app = Flask(__name__)
 
 def display_trade_log(trades):
     """
-    Stays 100% true to your automated logic.
-    Strike, PnL, and Status now pull directly from your trade data.
+    Displays the trade log with all requested columns.
+    Built on base version template.
     """
-    LOT_SIZE = 30 # Bank Nifty 2026
+    LOT_SIZE = 30 # Bank Nifty 2026 Lot Size
     
-    # Strictly maintaining your UI layout and spacing
+    # Header: Precisely aligned for your UI layout
     header = (f"{'Symbol':<10} | {'Signal Time':<18} | {'Type':<5} | {'Lots':<4} | "
               f"{'Strike':<7} | {'Entry':<8} | {'Exit':<8} | {'PnL':<9} | {'Status':<8} | {'Remarks':<15}")
     
@@ -20,11 +20,11 @@ def display_trade_log(trades):
     print("-" * len(header))
 
     for trade in trades:
-        # 1. PnL: Automatically calculated from your Entry/Exit
+        # PnL Calculation
         pnl = (trade['exit_price'] - trade['entry_price']) * (trade['lots'] * LOT_SIZE) if trade['exit_price'] > 0 else 0.0
         
-        # 2. Strike: Now properly mapped to your internal 'strike_price' logic
-        strike_display = trade.get('strike_price', 'Calculating...')
+        # Mapping Strike Price from your logic
+        strike_display = trade.get('strike_price', 'N/A')
         
         row = (f"{trade['symbol']:<10} | "
                f"{trade['signal_time']:<18} | "
@@ -39,11 +39,12 @@ def display_trade_log(trades):
         print(row)
     print("-" * len(header))
 
+@app.route('/', methods=['GET'])
+def home():
+    """FIX for 404 Error: Tells Render the bot is alive when visiting the URL"""
+    return "Bot is Online and Ready for Monday Morning!", 200
+
 @app.route('/webhook', methods=['POST'])
 def webhook_receiver():
-    # Minimal code to keep Render active without touching your core
-    return "OK", 200
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    """Receives alerts from TradingView 15m/1h Signals"""
+    data
