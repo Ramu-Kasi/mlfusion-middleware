@@ -51,12 +51,11 @@ def load_scrip_master():
     except Exception as e:
         log_now(f"BOOT ERROR: {e}")
 
-# Start loading in background so UI opens immediately
 threading.Thread(target=load_scrip_master, daemon=True).start()
 
 def get_atm_id(price, signal):
     try:
-        if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: return None, None, 30
+        if SCRIP_MASTER_DATA is None or SCRIP_MASTER_DATA.empty: return None, None, 15
         base_strike = round(float(price) / 100) * 100
         if "BUY" in signal.upper():
             strike, opt_type = base_strike - 100, "CE"
@@ -75,11 +74,11 @@ def get_atm_id(price, signal):
             today = pd.Timestamp(datetime.now().date())
             match = match[match[exp_col] >= today].sort_values(by=exp_col, ascending=True)
             if not match.empty:
-                return str(int(match.iloc[0][id_col])), strike, 30
-        return None, strike, 30
-    except Exception: return None, None, 30
+                return str(int(match.iloc[0][id_col])), strike, 15
+        return None, strike, 15
+    except Exception: return None, None, 15
 
-# --- 3. DASHBOARD UI (With Colors) ---
+# --- 3. DASHBOARD UI ---
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
@@ -93,7 +92,6 @@ DASHBOARD_HTML = """
         table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; }
         th { background: #333; color: white; padding: 12px; text-align: left; }
         td { padding: 12px; border-bottom: 1px solid #eee; }
-        /* UI CUSTOMIZATION: CE/PE COLORS */
         .ce-text { color: #28a745; font-weight: bold; }
         .pe-text { color: #d9534f; font-weight: bold; }
     </style>
@@ -105,7 +103,21 @@ DASHBOARD_HTML = """
     </div>
     <h3>Trade History (Jan1-2026 Version)</h3>
     <table>
-        <thead><tr><th>Time (IST)</th><th>Price</th><th>Strike</th><th>Type</th><th>Status</th><th>Remarks</th></tr></thead>
+        <thead>
+            <tr>
+                <th>Time (IST)</th>
+                <th>Price</th>
+                <th>Strike</th>
+                <th>Type</th>
+                <th>Lots</th>
+                <th>Premium Paid</th>
+                <th>Entry Price</th>
+                <th>Exit Price</th>
+                <th>Status</th>
+                <th>PnL</th>
+                <th>Remarks</th>
+            </tr>
+        </thead>
         <tbody>
             {% for trade in history %}
             <tr>
@@ -113,7 +125,12 @@ DASHBOARD_HTML = """
                 <td>{{ trade.price }}</td>
                 <td>{{ trade.strike }}</td>
                 <td class="{{ 'ce-text' if trade.type == 'CE' else 'pe-text' }}">{{ trade.type }}</td>
-                <td>{{ trade.status }}</td>
+                <td>{{ trade.lots }}</td>
+                <td>{{ trade.premium }}</td>
+                <td>{{ trade.entry }}</td>
+                <td>{{ trade.exit }}</td>
+                <td style="font-weight:bold; color: {{ 'orange' if trade.status == 'OPEN' else 'blue' }}">{{ trade.status }}</td>
+                <td style="color: {{ 'green' if trade.pnl >= 0 else 'red' }}">{{ trade.pnl }}</td>
                 <td>{{ trade.remarks }}</td>
             </tr>
             {% endfor %}
@@ -124,7 +141,7 @@ DASHBOARD_HTML = """
 """
 
 # --- 4. SURGICAL REVERSAL ---
-def surgical_reversal(signal_type):
+def surgical_reversal(signal_type, exit_price):
     was_closed = False
     try:
         positions_resp = dhan.get_positions()
@@ -136,6 +153,13 @@ def surgical_reversal(signal_type):
                     is_call, is_put = "CE" in symbol, "PE" in symbol
                     if (signal_type == "BUY" and is_put) or (signal_type == "SELL" and is_call):
                         dhan.place_order(security_id=pos['securityId'], exchange_segment=pos['exchangeSegment'], transaction_type=dhan.SELL if net_qty > 0 else dhan.BUY, quantity=abs(net_qty), order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
+                        
+                        # Update Status to CLOSED in history
+                        for trade in TRADE_HISTORY:
+                            if trade['status'] == 'OPEN' and (trade['type'] in symbol):
+                                trade['status'] = 'CLOSED'
+                                trade['exit'] = exit_price
+                                trade['pnl'] = round((exit_price - trade['entry']) * abs(net_qty), 2)
                         was_closed = True
         return was_closed
     except Exception: return False
@@ -152,7 +176,7 @@ def mlfusion():
     if not data: return jsonify({"status": "no data"}), 400
     msg, price = data.get('message', '').upper(), float(data.get('price', 0))
     
-    was_rev = surgical_reversal(msg)
+    was_rev = surgical_reversal(msg, price)
     time.sleep(0.5) 
     
     sec_id, strike, qty = get_atm_id(price, msg)
@@ -161,18 +185,23 @@ def mlfusion():
     order_res = dhan.place_order(security_id=sec_id, exchange_segment=dhan.NSE_FNO, transaction_type=dhan.BUY, quantity=qty, order_type=dhan.MARKET, product_type=dhan.MARGIN, price=0)
     
     trade_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
-    
-    opp_type = "PE" if "BUY" in msg else "CE"
     curr_type = "CE" if "BUY" in msg else "PE"
+    opp_type = "PE" if "BUY" in msg else "CE"
+    
+    lots = qty / 15 # Updated for BankNifty 15 lot size
+    entry_price = price # Using signal price as proxy for entry
     
     if order_res.get('status') == 'success':
         remark = f"Closed {opp_type} & Opened {curr_type} {strike}" if was_rev else f"Opened {curr_type} {strike}"
-    else:
-        remark = order_res.get('remarks', 'Entry Failed')
-
-    status_entry = {"time": trade_time, "price": price, "strike": strike, "type": curr_type, "status": "success" if order_res.get('status') == 'success' else "failure", "remarks": remark}
-    TRADE_HISTORY.insert(0, status_entry)
-    return jsonify(status_entry), 200
+        status_entry = {
+            "time": trade_time, "price": price, "strike": strike, "type": curr_type, 
+            "lots": int(lots), "premium": round(entry_price * qty, 2), "entry": entry_price, 
+            "exit": "-", "status": "OPEN", "pnl": 0.0, "remarks": remark
+        }
+        TRADE_HISTORY.insert(0, status_entry)
+        return jsonify(status_entry), 200
+    
+    return jsonify({"status": "failed", "remarks": order_res.get('remarks')}), 400
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
