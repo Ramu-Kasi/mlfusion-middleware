@@ -14,8 +14,7 @@ app = Flask(__name__)
 CLIENT_ID = os.environ.get("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
 
-dhan_context = DhanContext(client_id=CLIENT_ID)
-dhan_context.set_access_token(ACCESS_TOKEN)
+dhan_context = DhanContext(client_id=CLIENT_ID,access_token=ACCESS_TOKEN)
 
 dhan = dhanhq(dhan_context)
 
