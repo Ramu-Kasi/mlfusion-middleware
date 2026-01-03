@@ -57,6 +57,12 @@ def oauth_start():
         DHAN_API_SECRET
     )
 
+    # 🔴 FIX: SDK sometimes returns relative URL
+    if consent_url.startswith("/"):
+        consent_url = "https://auth.dhan.co" + consent_url
+
+    log_now(f"Redirecting to Dhan OAuth: {consent_url}")
+
     return redirect(consent_url)
 
 
