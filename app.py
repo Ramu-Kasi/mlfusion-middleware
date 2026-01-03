@@ -4,6 +4,7 @@ import time
 import pandas as pd
 from flask import Flask, request, jsonify, render_template_string
 from dhanhq import dhanhq
+from dhanhq.context import DhanContext
 from datetime import datetime, date
 import pytz
 import threading
@@ -13,7 +14,11 @@ app = Flask(__name__)
 # ---------------- CONFIG ----------------
 CLIENT_ID = os.environ.get("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
-dhan = dhanhq(CLIENT_ID)
+
+dhan_context = DhanContext(client_id=CLIENT_ID)
+dhan_context.set_access_token(ACCESS_TOKEN)
+
+dhan = dhanhq(dhan_context)
 
 IST = pytz.timezone("Asia/Kolkata")
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
