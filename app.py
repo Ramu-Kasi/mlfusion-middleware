@@ -26,12 +26,12 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 IST = pytz.timezone("Asia/Kolkata")
 
 # =============================================================================
-# GLOBAL STATE
+# GLOBAL STATE (same as AllColumnsFrozen)
 # =============================================================================
 dhan = None
 dhan_context = None
 
-TRADE_HISTORY = []          # list of dicts (unchanged structure)
+TRADE_HISTORY = []
 OPEN_TRADE_REF = None
 
 AUTH_ALERT_SENT_TODAY = False
@@ -50,12 +50,11 @@ def log_now(msg):
     sys.stderr.flush()
 
 # =============================================================================
-# TELEGRAM
+# TELEGRAM (NEW)
 # =============================================================================
 def notify_oauth_expired():
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
-
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -63,7 +62,7 @@ def notify_oauth_expired():
                 "chat_id": TELEGRAM_CHAT_ID,
                 "text": (
                     "⚠️ Dhan OAuth expired\n\n"
-                    "Please re-authorize before market opens:\n"
+                    "Re-authorize before market opens:\n"
                     "https://mlfusion-middleware.onrender.com/oauth/start"
                 )
             },
@@ -81,14 +80,13 @@ def is_auth_expired(resp=None, exc=None):
     return any(k in txt for k in ["token", "auth", "expired", "unauthorized", "invalid"])
 
 # =============================================================================
-# TRADE ACTIVE DAYS (RESTORED)
+# TRADE ACTIVE DAYS (unchanged logic)
 # =============================================================================
 def calculate_trade_days(entry_date_str, exit_date_str=None):
     entry_date = datetime.strptime(entry_date_str, "%Y-%m-%d").date()
     end_date = (
         datetime.strptime(exit_date_str, "%Y-%m-%d").date()
-        if exit_date_str
-        else datetime.now(IST).date()
+        if exit_date_str else datetime.now(IST).date()
     )
     return (end_date - entry_date).days + 1
 
@@ -101,11 +99,9 @@ def oauth_daily_check():
     while True:
         now = datetime.now(IST)
 
-        # Reset flag daily
         if now.hour == 0 and now.minute < 5:
             AUTH_ALERT_SENT_TODAY = False
 
-        # Do nothing until OAuth is completed
         if dhan is None:
             time.sleep(30)
             continue
@@ -120,7 +116,6 @@ def oauth_daily_check():
                 if is_auth_expired(exc=e):
                     notify_oauth_expired()
                     AUTH_ALERT_SENT_TODAY = True
-
             time.sleep(70)
 
         time.sleep(30)
@@ -173,7 +168,7 @@ def oauth_callback():
             ).start()
             WATCHDOG_STARTED = True
 
-        log_now("OAuth successful – system armed")
+        log_now("OAuth successful – token active")
         return "✅ Dhan OAuth successful. You may close this window."
 
     except Exception as e:
@@ -202,6 +197,46 @@ def check_dhan_api_status():
         DHAN_API_STATUS["message"] = "API Error"
 
 # =============================================================================
+# 🔥 MLFUSION WEBHOOK — RESTORED VERBATIM
+# =============================================================================
+@app.route("/mlfusion", methods=["POST"])
+def mlfusion():
+    global OPEN_TRADE_REF
+    data = request.get_json(force=True)
+    msg = data.get("message", "").upper()
+    price = float(data.get("price", 0))
+
+    log_now(f"MLFUSION ALERT | {msg} @ {price}")
+
+    detect_forced_exit()
+
+    sec, strike, qty, expiry_used = get_atm_id(price, msg)
+    if not sec:
+        return jsonify({"error": "ATM not found"}), 400
+
+    resp = dhan.place_order(
+        security_id=sec,
+        exchange="NFO",
+        transaction_type="BUY" if msg == "BUY" else "SELL",
+        quantity=qty,
+        order_type="MARKET",
+        product_type="M"
+    )
+
+    trade = build_trade_row(
+        msg=msg,
+        price=price,
+        strike=strike,
+        expiry_used=expiry_used,
+        resp=resp
+    )
+
+    TRADE_HISTORY.append(trade)
+    OPEN_TRADE_REF = trade if trade["Status"] == "OPEN" else None
+
+    return jsonify({"status": "ok"})
+
+# =============================================================================
 # DASHBOARD
 # =============================================================================
 @app.route("/")
@@ -216,7 +251,7 @@ def dashboard():
     )
 
 # =============================================================================
-# DASHBOARD HTML — ALL COLUMNS RESTORED
+# DASHBOARD HTML — ALL COLUMNS
 # =============================================================================
 DASHBOARD_HTML = """
 <!DOCTYPE html>
