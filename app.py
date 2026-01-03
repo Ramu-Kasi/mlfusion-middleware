@@ -196,51 +196,6 @@ def dashboard():
         last_run=datetime.now(IST).strftime("%H:%M:%S")
     )
 
-@app.route("/mlfusion", methods=["POST"])
-def mlfusion():
-    global OPEN_TRADE_REF
-    data = request.get_json(force=True)
-    msg = data["message"].upper()
-    price = float(data["price"])
-
-    surgical_reversal()
-
-    sec, strike, qty, expiry_used = get_atm_id(price, msg)
-    resp = dhan.place_order(
-        security_id=sec,
-        exchange_segment=dhan.NSE_FNO,
-        transaction_type=dhan.BUY,
-        quantity=qty,
-        order_type=dhan.MARKET,
-        product_type=dhan.MARGIN,
-        price=0
-    )
-
-    success = resp.get("status") == "success"
-
-    trade = {
-        "time": datetime.now(IST).strftime("%H:%M:%S"),
-        "price": price,
-        "strike": strike,
-        "type": "CE" if "BUY" in msg else "PE",
-        "expiry_used": expiry_used,
-        "lot_size": qty,
-        "premium_paid": "—",
-        "entry_price": "—",
-        "exit_price": "—",
-        "status": "OPEN" if success else "REJECTED",
-        "remarks": str(resp)
-    }
-
-    if success:
-        entry = fetch_price(sec)
-        trade["entry_price"] = entry or "—"
-        trade["premium_paid"] = round(entry * qty, 2) if entry else "—"
-        OPEN_TRADE_REF = trade
-
-    TRADE_HISTORY.insert(0, trade)
-    return jsonify(trade), 200
-
 # ---------------- UI ----------------
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -260,6 +215,7 @@ td{padding:10px;border-bottom:1px solid #eee}
 </style>
 </head>
 <body>
+
 <div class="status-bar">
 <b>Dhan API:</b>
 <span class="{% if api_state=='ACTIVE' %}status-active{% elif api_state=='EXPIRED' %}status-expired{% else %}status-error{% endif %}">
@@ -273,20 +229,25 @@ td{padding:10px;border-bottom:1px solid #eee}
 <table>
 <tr>
 <th>Time</th><th>Price</th><th>Strike</th><th>Type</th><th>Expiry Used</th>
-<th>Lot</th><th>Premium</th><th>Entry</th><th>Exit</th><th>Status</th><th>Remarks</th>
+<th>Lot</th><th>Premium</th><th>Entry</th><th>Exit</th>
+<th>Points Captured</th><th>PnL</th>
+<th>Status</th><th>Remarks</th>
 </tr>
+
 {% for t in history %}
 <tr>
-<td>{{t.time}}</td><td>{{t.price}}</td><td>{{t.strike}}</td><td>{{t.type}}</td>
-<td>{{t.expiry_used}}</td><td>{{t.lot_size}}</td><td>{{t.premium_paid}}</td>
-<td>{{t.entry_price}}</td><td>{{t.exit_price}}</td><td>{{t.status}}</td>
-<td>{{t.remarks}}</td>
-</tr>
-{% endfor %}
-</table>
-</body>
-</html>
-"""
+<td>{{t.time}}</td>
+<td>{{t.price}}</td>
+<td>{{t.strike}}</td>
+<td>{{t.type}}</td>
+<td>{{t.expiry_used}}</td>
+<td>{{t.lot_size}}</td>
+<td>{{t.premium_paid}}</td>
+<td>{{t.entry_price}}</td>
+<td>{{t.exit_price}}</td>
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+{% if t.entry_price != '—' and t.exit_price != '—' %}
+{% set pts = t.exit_price - t.entry_price %}
+<td>{{ pts }}</td>
+<td style="background-color:
+    {{ 'lightgreen' if pts * t.lot_size >_*
