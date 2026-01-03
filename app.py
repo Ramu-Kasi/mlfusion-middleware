@@ -20,25 +20,26 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 IST = pytz.timezone("Asia/Kolkata")
+SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
 
-AUTH_MODE = "OAUTH"
-AUTH_STATUS = "OK"
-
-# OAuth runtime objects (memory only by design)
-dhan_context = None
+# OAuth-only runtime objects
 dhan = None
+dhan_context = None
 
-# ---------------- STATE ----------------
-AUTH_ALERT_SENT_TODAY = False
+SCRIP_MASTER_DATA = None
+BN_EXPIRIES = []
+
 TRADE_HISTORY = []
 OPEN_TRADE_REF = None
+
+AUTH_ALERT_SENT_TODAY = False
 
 DHAN_API_STATUS = {
     "state": "UNKNOWN",
     "message": "Checking..."
 }
 
-# ---------------- UTIL ----------------
+# ---------------- LOG ----------------
 def log_now(msg):
     sys.stderr.write(f"[ALGO_ENGINE] {msg}\n")
     sys.stderr.flush()
@@ -46,9 +47,7 @@ def log_now(msg):
 # ---------------- TELEGRAM ----------------
 def notify_oauth_expired():
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log_now("Telegram env missing – cannot send OAuth alert")
         return
-
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -56,7 +55,7 @@ def notify_oauth_expired():
                 "chat_id": TELEGRAM_CHAT_ID,
                 "text": (
                     "⚠️ Dhan OAuth expired\n\n"
-                    "Please re-authorize before market opens:\n"
+                    "Re-authorize before market opens:\n"
                     "https://mlfusion-middleware.onrender.com/oauth/start"
                 )
             },
@@ -73,14 +72,12 @@ def is_auth_expired(resp=None, exc=None):
         txt = str(exc).lower()
     return any(k in txt for k in ["token", "auth", "expired", "unauthorized", "invalid"])
 
-# ---------------- 08:45 AM IST WATCHDOG ----------------
+# ---------------- 08:45 IST CHECK ----------------
 def oauth_daily_check():
     global AUTH_ALERT_SENT_TODAY
-
     while True:
         now = datetime.now(IST)
 
-        # reset once per day
         if now.hour == 0 and now.minute < 5:
             AUTH_ALERT_SENT_TODAY = False
 
@@ -94,7 +91,6 @@ def oauth_daily_check():
                 if is_auth_expired(exc=e):
                     notify_oauth_expired()
                     AUTH_ALERT_SENT_TODAY = True
-
             time.sleep(70)
 
         time.sleep(30)
@@ -109,31 +105,27 @@ def oauth_start():
         DHAN_API_KEY,
         DHAN_API_SECRET
     )
-
-    consent_url = (
+    return redirect(
         "https://auth.dhan.co/login/consentApp-login"
         f"?consentAppId={consent_app_id}"
     )
-    log_now("Redirecting to Dhan OAuth")
-    return redirect(consent_url)
 
 @app.route("/oauth/callback")
 def oauth_callback():
-    global dhan, dhan_context, AUTH_STATUS
-
+    global dhan, dhan_context
     try:
         token_id = request.args.get("token_id") or request.args.get("tokenId")
         if not token_id:
             return "OAuth failed: tokenId missing", 400
 
         dhan_login = DhanLogin(CLIENT_ID)
-        token_response = dhan_login.consume_token_id(
+        token_resp = dhan_login.consume_token_id(
             token_id=token_id,
             app_id=DHAN_API_KEY,
             app_secret=DHAN_API_SECRET
         )
 
-        access_token = token_response.get("accessToken")
+        access_token = token_resp.get("accessToken")
         if not access_token:
             raise Exception("Invalid OAuth token response")
 
@@ -143,95 +135,9 @@ def oauth_callback():
         )
         dhan = dhanhq(dhan_context)
 
-        AUTH_STATUS = "OK"
         log_now("OAuth successful – token active")
         return "✅ Dhan OAuth successful. You may close this window."
 
     except Exception as e:
-        AUTH_STATUS = "FAILED"
         log_now(f"OAuth error: {e}")
         return f"OAuth error: {str(e)}", 500
-
-# ---------------- API HEALTH ----------------
-def check_dhan_api_status():
-    try:
-        resp = dhan.get_positions()
-        if resp.get("status") == "success":
-            DHAN_API_STATUS["state"] = "ACTIVE"
-            DHAN_API_STATUS["message"] = "Active (OAUTH)"
-        else:
-            DHAN_API_STATUS["state"] = "ERROR"
-            DHAN_API_STATUS["message"] = "API Error"
-    except Exception:
-        DHAN_API_STATUS["state"] = "ERROR"
-        DHAN_API_STATUS["message"] = "API Error"
-
-# ---------------- DASHBOARD ----------------
-@app.route("/")
-def dashboard():
-    check_dhan_api_status()
-    return render_template_string(
-        DASHBOARD_HTML,
-        history=TRADE_HISTORY,
-        api_state=DHAN_API_STATUS["state"],
-        api_message=DHAN_API_STATUS["message"],
-        last_run=datetime.now(IST).strftime("%H:%M:%S")
-    )
-
-# ---------------- UI (FULL RESTORED COLUMNS) ----------------
-DASHBOARD_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-<meta http-equiv="refresh" content="60">
-<style>
-body { font-family: Arial; background:#f5f6f7; padding:20px }
-table { border-collapse: collapse; width:100%; }
-th, td { border:1px solid #ccc; padding:6px; text-align:center; }
-th { background:#222; color:white; }
-.status-ok { background:#28a745; color:white; padding:4px 10px; border-radius:10px }
-.status-err { background:#f0ad4e; color:white; padding:4px 10px; border-radius:10px }
-</style>
-</head>
-<body>
-
-<div style="margin-bottom:10px">
-<b>Dhan API:</b>
-<span class="{{ 'status-ok' if api_state=='ACTIVE' else 'status-err' }}">
-{{ api_message }}
-</span>
-&nbsp;&nbsp;
-Last Check: {{ last_run }} IST
-</div>
-
-<table>
-<tr>
-<th>Date</th><th>Time</th><th>Price</th><th>Strike</th><th>Type</th>
-<th>Expiry Used</th><th>Lot</th><th>Premium</th>
-<th>Entry</th><th>Exit</th><th>Status</th><th>Remarks</th>
-</tr>
-{% for row in history %}
-<tr>
-<td>{{ row.Date }}</td>
-<td>{{ row.Time }}</td>
-<td>{{ row.Price }}</td>
-<td>{{ row.Strike }}</td>
-<td>{{ row.Type }}</td>
-<td>{{ row.Expiry }}</td>
-<td>{{ row.Lot }}</td>
-<td>{{ row.Premium }}</td>
-<td>{{ row.Entry }}</td>
-<td>{{ row.Exit }}</td>
-<td>{{ row.Status }}</td>
-<td>{{ row.Remarks }}</td>
-</tr>
-{% endfor %}
-</table>
-
-</body>
-</html>
-"""
-
-# ---------------- MAIN ----------------
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
