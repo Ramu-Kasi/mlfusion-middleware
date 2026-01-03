@@ -52,14 +52,15 @@ def log_now(msg):
 def oauth_start():
     dhan_login = DhanLogin(CLIENT_ID)
 
-    consent_url = dhan_login.generate_login_session(
+    consent_app_id = dhan_login.generate_login_session(
         DHAN_API_KEY,
         DHAN_API_SECRET
     )
 
-    # 🔴 FIX: SDK sometimes returns relative URL
-    if consent_url.startswith("/"):
-        consent_url = "https://auth.dhan.co" + consent_url
+    consent_url = (
+        "https://auth.dhan.co/login/consentApp-login"
+        f"?consentAppId={consent_app_id}"
+    )
 
     log_now(f"Redirecting to Dhan OAuth: {consent_url}")
 
