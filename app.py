@@ -2,8 +2,8 @@ import os
 import sys
 import time
 import pandas as pd
-from flask import Flask, request, jsonify, render_template_string
-from dhanhq import dhanhq, DhanContext
+from flask import Flask, request, jsonify, render_template_string, redirect
+from dhanhq import dhanhq, DhanContext, DhanLogin
 from datetime import datetime, date
 import pytz
 import threading
@@ -14,8 +14,18 @@ app = Flask(__name__)
 CLIENT_ID = os.environ.get("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
 
-dhan_context = DhanContext(client_id=CLIENT_ID,access_token=ACCESS_TOKEN)
+DHAN_API_KEY = os.environ.get("DHAN_API_KEY")
+DHAN_API_SECRET = os.environ.get("DHAN_API_SECRET")
+DHAN_REDIRECT_URL = os.environ.get("DHAN_REDIRECT_URL")
 
+AUTH_MODE = "ENV_TOKEN"   # ENV_TOKEN | OAUTH
+AUTH_STATUS = "OK"
+
+# -------- INITIAL DHAN CONTEXT (fallback token) --------
+dhan_context = DhanContext(
+    client_id=CLIENT_ID,
+    access_token=ACCESS_TOKEN
+)
 dhan = dhanhq(dhan_context)
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -36,6 +46,50 @@ DHAN_API_STATUS = {
 def log_now(msg):
     sys.stderr.write(f"[ALGO_ENGINE] {msg}\n")
     sys.stderr.flush()
+
+# ---------------- OAUTH ROUTES ----------------
+@app.route("/oauth/start")
+def oauth_start():
+    dhan_login = DhanLogin(CLIENT_ID)
+    consent_url = dhan_login.generate_login_session(
+        app_id=DHAN_API_KEY,
+        app_secret=DHAN_API_SECRET,
+        redirect_uri=DHAN_REDIRECT_URL
+    )
+    return redirect(consent_url)
+
+@app.route("/oauth/callback")
+def oauth_callback():
+    global dhan, dhan_context, AUTH_MODE, AUTH_STATUS
+
+    try:
+        token_id = request.args.get("token_id")
+        if not token_id:
+            return "OAuth failed: token_id missing", 400
+
+        dhan_login = DhanLogin(CLIENT_ID)
+        access_token = dhan_login.consume_token_id(
+            token_id=token_id,
+            app_id=DHAN_API_KEY,
+            app_secret=DHAN_API_SECRET
+        )
+
+        dhan_context = DhanContext(
+            client_id=CLIENT_ID,
+            access_token=access_token
+        )
+        dhan = dhanhq(dhan_context)
+
+        AUTH_MODE = "OAUTH"
+        AUTH_STATUS = "OK"
+
+        log_now("OAuth successful – switched to OAuth token")
+        return "✅ Dhan OAuth successful. You may close this window."
+
+    except Exception as e:
+        AUTH_STATUS = "FAILED"
+        log_now(f"OAuth error: {e}")
+        return f"OAuth error: {str(e)}", 500
 
 # ---------------- SCRIP MASTER ----------------
 def load_scrip_master():
@@ -98,9 +152,7 @@ def get_active_expiry_details():
 def get_atm_id(price, signal):
     try:
         base = round(price / 100) * 100
-        strike, opt = (
-            (base - 100, "CE") if "BUY" in signal else (base + 100, "PE")
-        )
+        strike, opt = ((base - 100, "CE") if "BUY" in signal else (base + 100, "PE"))
 
         cols = SCRIP_MASTER_DATA.columns
         sc = next(c for c in cols if "STRIKE" in c.upper())
@@ -151,61 +203,22 @@ def check_dhan_api_status():
         resp = dhan.get_positions()
         if resp.get("status") == "success":
             DHAN_API_STATUS["state"] = "ACTIVE"
-            DHAN_API_STATUS["message"] = "Active"
+            DHAN_API_STATUS["message"] = f"Active ({AUTH_MODE})"
         else:
-            err = str(resp).lower()
-            if "dh-901" in err or "invalid_authentication" in err:
-                DHAN_API_STATUS["state"] = "EXPIRED"
-                DHAN_API_STATUS["message"] = "Token Expired"
-            else:
-                DHAN_API_STATUS["state"] = "ERROR"
-                DHAN_API_STATUS["message"] = "API Error"
+            DHAN_API_STATUS["state"] = "ERROR"
+            DHAN_API_STATUS["message"] = "API Error"
     except Exception:
         DHAN_API_STATUS["state"] = "ERROR"
         DHAN_API_STATUS["message"] = "API Error"
-
-# ---------------- FORCED EXIT ----------------
-def detect_forced_exit():
-    global OPEN_TRADE_REF
-    if not OPEN_TRADE_REF:
-        return
-    try:
-        pos = dhan.get_positions()
-        if pos.get("status") != "success":
-            return
-        bn_open = any(
-            "BANKNIFTY" in p["tradingSymbol"] and int(p["netQty"]) != 0
-            for p in pos["data"]
-        )
-        if not bn_open:
-            OPEN_TRADE_REF["exit_price"] = fetch_price()
-            OPEN_TRADE_REF["status"] = "CLOSED"
-            OPEN_TRADE_REF["remarks"] = "FORCED EXIT"
-            OPEN_TRADE_REF = None
-    except Exception:
-        pass
-
-# ---------------- TRADE ACTIVE DAYS ----------------
-def trade_active_days(trade):
-    try:
-        if trade.get("status") == "REJECTED" or trade.get("entry_price") in ["—", None]:
-            return "—"
-        start = datetime.strptime(trade["date"], "%d-%b-%Y").date()
-        end = date.today()
-        return (end - start).days + 1
-    except Exception:
-        return "—"
 
 # ---------------- ROUTES ----------------
 @app.route("/")
 def dashboard():
     check_dhan_api_status()
-    detect_forced_exit()
     expiry, dte = get_active_expiry_details()
     return render_template_string(
         DASHBOARD_HTML,
         history=TRADE_HISTORY,
-        trade_active_days=trade_active_days,
         api_state=DHAN_API_STATUS["state"],
         api_message=DHAN_API_STATUS["message"],
         active_expiry=expiry,
@@ -216,12 +229,12 @@ def dashboard():
 @app.route("/mlfusion", methods=["POST"])
 def mlfusion():
     global OPEN_TRADE_REF
+
     data = request.get_json(force=True)
     msg = data.get("message", "").upper()
     price = float(data.get("price", 0))
 
     log_now(f"MLFUSION ALERT | {msg} @ {price}")
-    detect_forced_exit()
 
     sec, strike, qty, expiry_used = get_atm_id(price, msg)
     if not sec:
@@ -271,20 +284,9 @@ DASHBOARD_HTML = '''
 <meta http-equiv="refresh" content="60">
 <style>
 body{font-family:sans-serif;background:#f0f2f5;padding:20px}
-.status-bar{background:#fff;padding:15px;border-radius:8px;display:flex;gap:20px;align-items:center}
 .status-active{background:#28a745;color:#fff;padding:2px 10px;border-radius:10px}
-.status-expired{background:#d9534f;color:#fff;padding:2px 10px;border-radius:10px}
 .status-error{background:#f0ad4e;color:#fff;padding:2px 10px;border-radius:10px}
 .expiry-danger{color:#d9534f;font-weight:bold}
-
-.journal-title{
-    font-family:"Georgia","Times New Roman",serif;
-    font-size:21px;
-    font-weight:500;
-    color:#b08d57;
-    letter-spacing:0.6px;
-}
-
 table{width:100%;border-collapse:collapse;background:#fff;margin-top:20px}
 th{background:#333;color:#fff;padding:10px}
 td{padding:10px;border-bottom:1px solid #eee}
@@ -292,53 +294,32 @@ td{padding:10px;border-bottom:1px solid #eee}
 </head>
 <body>
 
-<div class="status-bar">
-    <div>
-        <b>Dhan API:</b>
-        <span class="{% if api_state=='ACTIVE' %}status-active{% elif api_state=='EXPIRED' %}status-expired{% else %}status-error{% endif %}">
-            {{ api_message }}
-        </span>
-        &nbsp;&nbsp;
-        <b>Active BN Expiry:</b>
-        <span class="{{ 'expiry-danger' if expiry_danger else '' }}">{{ active_expiry }}</span>
-    </div>
-
-    <div class="journal-title" style="margin:0 auto;">
-        Ramu’s Magic Journal
-    </div>
-
-    <div>
-        Last Check: {{ last_run }} IST
-    </div>
+<div>
+<b>Dhan API:</b>
+<span class="{{ 'status-active' if api_state=='ACTIVE' else 'status-error' }}">
+{{ api_message }}
+</span>
+&nbsp;&nbsp;
+<b>Active BN Expiry:</b>
+<span class="{{ 'expiry-danger' if expiry_danger else '' }}">{{ active_expiry }}</span>
+&nbsp;&nbsp;
+Last Check: {{ last_run }} IST
 </div>
 
 <table>
 <tr>
-<th>Date</th><th>Time</th><th>Price</th><th>Strike</th><th>Type</th><th>Expiry Used</th>
-<th>Lot</th><th>Premium</th><th>Entry</th><th>Exit</th>
-<th>Points Captured</th><th>PnL</th><th>Trade Active Days</th>
-<th>Status</th><th>Remarks</th>
+<th>Date</th><th>Time</th><th>Price</th><th>Strike</th><th>Type</th>
+<th>Expiry Used</th><th>Lot</th><th>Premium</th>
+<th>Entry</th><th>Exit</th><th>Status</th><th>Remarks</th>
 </tr>
 
 {% for t in history %}
 <tr>
-<td>{{t.date}}</td><td>{{t.time}}</td><td>{{t.price}}</td><td>{{t.strike}}</td><td>{{t.type}}</td>
-<td>{{t.expiry_used}}</td><td>{{t.lot_size}}</td><td>{{t.premium_paid}}</td>
-<td>{{t.entry_price}}</td><td>{{t.exit_price}}</td>
-
-{% if t.entry_price != '—' and t.exit_price != '—' %}
-{% set pts = t.exit_price - t.entry_price %}
-<td>{{ pts }}</td>
-<td style="background-color:
-{{ 'lightgreen' if pts * t.lot_size > 0 else 'lightcoral' if pts * t.lot_size < 0 else 'lightyellow' }}">
-₹{{ pts * t.lot_size }}
-</td>
-{% else %}
-<td>—</td><td style="background-color:lightyellow">—</td>
-{% endif %}
-
-<td>{{ trade_active_days(t) }}</td>
-<td>{{t.status}}</td><td>{{t.remarks}}</td>
+<td>{{t.date}}</td><td>{{t.time}}</td><td>{{t.price}}</td>
+<td>{{t.strike}}</td><td>{{t.type}}</td>
+<td>{{t.expiry_used}}</td><td>{{t.lot_size}}</td>
+<td>{{t.premium_paid}}</td><td>{{t.entry_price}}</td>
+<td>{{t.exit_price}}</td><td>{{t.status}}</td><td>{{t.remarks}}</td>
 </tr>
 {% endfor %}
 </table>
