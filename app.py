@@ -13,7 +13,7 @@ app = Flask(__name__)
 # ---------------- CONFIG ----------------
 CLIENT_ID = os.environ.get("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
-dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
+dhan = dhanhq(CLIENT_ID)
 
 IST = pytz.timezone("Asia/Kolkata")
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
