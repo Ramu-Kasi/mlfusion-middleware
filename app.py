@@ -72,7 +72,7 @@ def oauth_callback():
     global dhan, dhan_context, AUTH_MODE, AUTH_STATUS
 
     try:
-        token_id = request.args.get("token_id")
+        token_id = request.args.get("token_id") or request.args.get("tokenId")
         if not token_id:
             return "OAuth failed: token_id missing", 400
 
