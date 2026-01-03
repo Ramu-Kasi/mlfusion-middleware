@@ -91,46 +91,14 @@ def get_active_expiry_details():
     active = nxt if dte <= 5 else curr
     return active.strftime("%d-%b-%Y"), dte
 
-# ---------------- ATM ----------------
-def get_atm_id(price, signal):
-    try:
-        base = round(price / 100) * 100
-        strike, opt = (base - 100, "CE") if "BUY" in signal else (base + 100, "PE")
-
-        cols = SCRIP_MASTER_DATA.columns
-        sc = next(c for c in cols if "STRIKE" in c.upper())
-        tc = next(c for c in cols if "OPTION_TYPE" in c.upper())
-        ec = next(c for c in cols if "EXPIRY_DATE" in c.upper())
-        ic = next(c for c in cols if "SECURITY" in c.upper() or "TOKEN" in c.upper())
-
-        curr, nxt = get_current_and_next_expiry()
-        dte = (curr.date() - datetime.now(IST).date()).days if curr else 99
-        expiry = nxt if dte <= 5 else curr
-
-        row = SCRIP_MASTER_DATA[
-            (SCRIP_MASTER_DATA[sc] == strike) &
-            (SCRIP_MASTER_DATA[tc] == opt) &
-            (SCRIP_MASTER_DATA[ec] == expiry)
-        ]
-
-        if row.empty:
-            return None, strike, 30, "—"
-
-        return str(int(row.iloc[0][ic])), strike, 30, expiry.strftime("%d-%b-%Y")
-
-    except Exception as e:
-        log_now(f"ATM error: {e}")
-        return None, None, 30, "—"
-
 # ---------------- PRICE ----------------
 def fetch_price(sec_id):
     try:
-        time.sleep(0.5)
         tb = dhan.get_trade_book()
         if tb.get("status") != "success":
             return None
         for t in reversed(tb["data"]):
-            if str(t["securityId"]) == str(sec_id):
+            if sec_id is None or str(t["securityId"]) == str(sec_id):
                 return float(t["tradedPrice"])
     except Exception:
         pass
@@ -155,29 +123,31 @@ def check_dhan_api_status():
         DHAN_API_STATUS["state"] = "ERROR"
         DHAN_API_STATUS["message"] = "API Error"
 
-# ---------------- REVERSAL ----------------
-def surgical_reversal():
+# ---------------- FORCED EXIT DETECTION ----------------
+def detect_forced_exit():
     global OPEN_TRADE_REF
+
+    if not OPEN_TRADE_REF:
+        return
+
     try:
         pos = dhan.get_positions()
         if pos.get("status") != "success":
             return
+
+        bn_open = False
         for p in pos["data"]:
             if "BANKNIFTY" in p["tradingSymbol"] and int(p["netQty"]) != 0:
-                dhan.place_order(
-                    security_id=p["securityId"],
-                    exchange_segment=p["exchangeSegment"],
-                    transaction_type=dhan.SELL,
-                    quantity=abs(int(p["netQty"])),
-                    order_type=dhan.MARKET,
-                    product_type=dhan.MARGIN,
-                    price=0
-                )
-                if OPEN_TRADE_REF:
-                    OPEN_TRADE_REF["exit_price"] = fetch_price(p["securityId"]) or "—"
-                    OPEN_TRADE_REF["status"] = "CLOSED"
-                    OPEN_TRADE_REF = None
-                return
+                bn_open = True
+                break
+
+        # Position gone → forced exit
+        if not bn_open:
+            OPEN_TRADE_REF["exit_price"] = fetch_price(None) or "—"
+            OPEN_TRADE_REF["status"] = "CLOSED"
+            OPEN_TRADE_REF["remarks"] = "FORCED EXIT"
+            OPEN_TRADE_REF = None
+
     except Exception:
         pass
 
@@ -185,6 +155,7 @@ def surgical_reversal():
 @app.route("/")
 def dashboard():
     check_dhan_api_status()
+    detect_forced_exit()   # <<< KEY ADDITION
     expiry, dte = get_active_expiry_details()
     return render_template_string(
         DASHBOARD_HTML,
@@ -197,7 +168,7 @@ def dashboard():
     )
 
 # ---------------- UI ----------------
-DASHBOARD_HTML = """
+DASHBOARD_HTML = '''
 <!DOCTYPE html>
 <html>
 <head>
@@ -250,4 +221,25 @@ td{padding:10px;border-bottom:1px solid #eee}
 {% set pts = t.exit_price - t.entry_price %}
 <td>{{ pts }}</td>
 <td style="background-color:
-    {{ 'lightgreen' if pts * t.lot_size >_*
+    {{ 'lightgreen' if pts * t.lot_size > 0 else
+       'lightcoral' if pts * t.lot_size < 0 else
+       'lightyellow' }}">
+₹{{ pts * t.lot_size }}
+</td>
+{% else %}
+<td>—</td>
+<td style="background-color:lightyellow">—</td>
+{% endif %}
+
+<td>{{t.status}}</td>
+<td>{{t.remarks}}</td>
+</tr>
+{% endfor %}
+</table>
+
+</body>
+</html>
+'''
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
