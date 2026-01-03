@@ -13,29 +13,23 @@ app = Flask(__name__)
 
 # ---------------- CONFIG ----------------
 CLIENT_ID = os.environ.get("DHAN_CLIENT_ID")
-
 DHAN_API_KEY = os.environ.get("DHAN_API_KEY")
 DHAN_API_SECRET = os.environ.get("DHAN_API_SECRET")
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
+IST = pytz.timezone("Asia/Kolkata")
+
 AUTH_MODE = "OAUTH"
 AUTH_STATUS = "OK"
 
-IST = pytz.timezone("Asia/Kolkata")
-
-# -------- INITIAL EMPTY CONTEXT (OAuth only) --------
+# OAuth runtime objects (memory only by design)
 dhan_context = None
 dhan = None
 
 # ---------------- STATE ----------------
 AUTH_ALERT_SENT_TODAY = False
-
-SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
-SCRIP_MASTER_DATA = None
-BN_EXPIRIES = []
-
 TRADE_HISTORY = []
 OPEN_TRADE_REF = None
 
@@ -44,15 +38,15 @@ DHAN_API_STATUS = {
     "message": "Checking..."
 }
 
-# ---------------- LOG ----------------
+# ---------------- UTIL ----------------
 def log_now(msg):
     sys.stderr.write(f"[ALGO_ENGINE] {msg}\n")
     sys.stderr.flush()
 
-# ---------------- NOTIFICATION ----------------
+# ---------------- TELEGRAM ----------------
 def notify_oauth_expired():
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log_now("Telegram credentials missing. Skipping notification.")
+        log_now("Telegram env missing – cannot send OAuth alert")
         return
 
     try:
@@ -62,65 +56,55 @@ def notify_oauth_expired():
                 "chat_id": TELEGRAM_CHAT_ID,
                 "text": (
                     "⚠️ Dhan OAuth expired\n\n"
-                    "Please re-authorize before market:\n"
+                    "Please re-authorize before market opens:\n"
                     "https://mlfusion-middleware.onrender.com/oauth/start"
                 )
             },
             timeout=5
         )
     except Exception as e:
-        log_now(f"Telegram notify error: {e}")
+        log_now(f"Telegram error: {e}")
 
 def is_auth_expired(resp=None, exc=None):
-    text = ""
+    txt = ""
     if resp:
-        text = str(resp).lower()
+        txt = str(resp).lower()
     if exc:
-        text = str(exc).lower()
+        txt = str(exc).lower()
+    return any(k in txt for k in ["token", "auth", "expired", "unauthorized", "invalid"])
 
-    return any(k in text for k in [
-        "token",
-        "auth",
-        "expired",
-        "unauthorized",
-        "invalid"
-    ])
-
-# ---------------- DAILY 8:45 CHECK ----------------
+# ---------------- 08:45 AM IST WATCHDOG ----------------
 def oauth_daily_check():
     global AUTH_ALERT_SENT_TODAY
 
     while True:
         now = datetime.now(IST)
 
-        # Reset flag shortly after midnight
+        # reset once per day
         if now.hour == 0 and now.minute < 5:
             AUTH_ALERT_SENT_TODAY = False
 
-        # Run ONLY at 08:45 IST
         if now.hour == 8 and now.minute == 45 and not AUTH_ALERT_SENT_TODAY:
             try:
                 resp = dhan.get_profile()
-                if resp.get("status") != "success":
-                    if is_auth_expired(resp=resp):
-                        notify_oauth_expired()
-                        AUTH_ALERT_SENT_TODAY = True
+                if resp.get("status") != "success" and is_auth_expired(resp=resp):
+                    notify_oauth_expired()
+                    AUTH_ALERT_SENT_TODAY = True
             except Exception as e:
                 if is_auth_expired(exc=e):
                     notify_oauth_expired()
                     AUTH_ALERT_SENT_TODAY = True
 
-            time.sleep(70)  # avoid double trigger
+            time.sleep(70)
 
         time.sleep(30)
 
 threading.Thread(target=oauth_daily_check, daemon=True).start()
 
-# ---------------- OAUTH ROUTES ----------------
+# ---------------- OAUTH ----------------
 @app.route("/oauth/start")
 def oauth_start():
     dhan_login = DhanLogin(CLIENT_ID)
-
     consent_app_id = dhan_login.generate_login_session(
         DHAN_API_KEY,
         DHAN_API_SECRET
@@ -130,21 +114,19 @@ def oauth_start():
         "https://auth.dhan.co/login/consentApp-login"
         f"?consentAppId={consent_app_id}"
     )
-
-    log_now(f"Redirecting to Dhan OAuth: {consent_url}")
+    log_now("Redirecting to Dhan OAuth")
     return redirect(consent_url)
 
 @app.route("/oauth/callback")
 def oauth_callback():
-    global dhan, dhan_context, AUTH_MODE, AUTH_STATUS
+    global dhan, dhan_context, AUTH_STATUS
 
     try:
         token_id = request.args.get("token_id") or request.args.get("tokenId")
         if not token_id:
-            return "OAuth failed: token_id missing", 400
+            return "OAuth failed: tokenId missing", 400
 
         dhan_login = DhanLogin(CLIENT_ID)
-
         token_response = dhan_login.consume_token_id(
             token_id=token_id,
             app_id=DHAN_API_KEY,
@@ -153,19 +135,16 @@ def oauth_callback():
 
         access_token = token_response.get("accessToken")
         if not access_token:
-            raise Exception(f"Invalid token response: {token_response}")
+            raise Exception("Invalid OAuth token response")
 
         dhan_context = DhanContext(
             client_id=CLIENT_ID,
             access_token=access_token
         )
-
         dhan = dhanhq(dhan_context)
 
-        AUTH_MODE = "OAUTH"
         AUTH_STATUS = "OK"
-
-        log_now("OAuth successful – switched to OAuth token")
+        log_now("OAuth successful – token active")
         return "✅ Dhan OAuth successful. You may close this window."
 
     except Exception as e:
@@ -199,32 +178,60 @@ def dashboard():
         last_run=datetime.now(IST).strftime("%H:%M:%S")
     )
 
-# ---------------- UI ----------------
-DASHBOARD_HTML = '''
+# ---------------- UI (FULL RESTORED COLUMNS) ----------------
+DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
 <meta http-equiv="refresh" content="60">
 <style>
-body{font-family:sans-serif;background:#f0f2f5;padding:20px}
-.status-active{background:#28a745;color:#fff;padding:2px 10px;border-radius:10px}
-.status-error{background:#f0ad4e;color:#fff;padding:2px 10px;border-radius:10px}
+body { font-family: Arial; background:#f5f6f7; padding:20px }
+table { border-collapse: collapse; width:100%; }
+th, td { border:1px solid #ccc; padding:6px; text-align:center; }
+th { background:#222; color:white; }
+.status-ok { background:#28a745; color:white; padding:4px 10px; border-radius:10px }
+.status-err { background:#f0ad4e; color:white; padding:4px 10px; border-radius:10px }
 </style>
 </head>
 <body>
 
-<div>
+<div style="margin-bottom:10px">
 <b>Dhan API:</b>
-<span class="{{ 'status-active' if api_state=='ACTIVE' else 'status-error' }}">
+<span class="{{ 'status-ok' if api_state=='ACTIVE' else 'status-err' }}">
 {{ api_message }}
 </span>
 &nbsp;&nbsp;
 Last Check: {{ last_run }} IST
 </div>
 
+<table>
+<tr>
+<th>Date</th><th>Time</th><th>Price</th><th>Strike</th><th>Type</th>
+<th>Expiry Used</th><th>Lot</th><th>Premium</th>
+<th>Entry</th><th>Exit</th><th>Status</th><th>Remarks</th>
+</tr>
+{% for row in history %}
+<tr>
+<td>{{ row.Date }}</td>
+<td>{{ row.Time }}</td>
+<td>{{ row.Price }}</td>
+<td>{{ row.Strike }}</td>
+<td>{{ row.Type }}</td>
+<td>{{ row.Expiry }}</td>
+<td>{{ row.Lot }}</td>
+<td>{{ row.Premium }}</td>
+<td>{{ row.Entry }}</td>
+<td>{{ row.Exit }}</td>
+<td>{{ row.Status }}</td>
+<td>{{ row.Remarks }}</td>
+</tr>
+{% endfor %}
+</table>
+
 </body>
 </html>
-'''
+"""
 
+# ---------------- MAIN ----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
