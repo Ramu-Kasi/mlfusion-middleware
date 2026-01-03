@@ -51,11 +51,13 @@ def log_now(msg):
 @app.route("/oauth/start")
 def oauth_start():
     dhan_login = DhanLogin(CLIENT_ID)
+
     consent_url = dhan_login.generate_login_session(
-        app_id=DHAN_API_KEY,
-        app_secret=DHAN_API_SECRET,
-        redirect_uri=DHAN_REDIRECT_URL
+        DHAN_API_KEY,
+        DHAN_API_SECRET,
+        DHAN_REDIRECT_URL
     )
+
     return redirect(consent_url)
 
 @app.route("/oauth/callback")
