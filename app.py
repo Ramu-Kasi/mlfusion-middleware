@@ -273,6 +273,15 @@ body{font-family:sans-serif;background:#f0f2f5;padding:20px}
 .status-expired{background:#d9534f;color:#fff;padding:2px 10px;border-radius:10px}
 .status-error{background:#f0ad4e;color:#fff;padding:2px 10px;border-radius:10px}
 .expiry-danger{color:#d9534f;font-weight:bold}
+
+.journal-title{
+    font-family:"Georgia","Times New Roman",serif;
+    font-size:21px;
+    font-weight:500;
+    color:#b08d57;
+    letter-spacing:0.6px;
+}
+
 table{width:100%;border-collapse:collapse;background:#fff;margin-top:20px}
 th{background:#333;color:#fff;padding:10px}
 td{padding:10px;border-bottom:1px solid #eee}
@@ -291,7 +300,7 @@ td{padding:10px;border-bottom:1px solid #eee}
         <span class="{{ 'expiry-danger' if expiry_danger else '' }}">{{ active_expiry }}</span>
     </div>
 
-    <div style="margin: 0 auto; font-weight: 600;">
+    <div class="journal-title" style="margin:0 auto;">
         Ramu’s Magic Journal
     </div>
 
