@@ -7,30 +7,32 @@ from dhanhq import dhanhq, DhanContext, DhanLogin
 from datetime import datetime, date
 import pytz
 import threading
+import requests
 
 app = Flask(__name__)
 
 # ---------------- CONFIG ----------------
 CLIENT_ID = os.environ.get("DHAN_CLIENT_ID")
-ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
 
 DHAN_API_KEY = os.environ.get("DHAN_API_KEY")
 DHAN_API_SECRET = os.environ.get("DHAN_API_SECRET")
-DHAN_REDIRECT_URL = os.environ.get("DHAN_REDIRECT_URL")
 
-AUTH_MODE = "ENV_TOKEN"   # ENV_TOKEN | OAUTH
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+AUTH_MODE = "OAUTH"
 AUTH_STATUS = "OK"
 
-# -------- INITIAL DHAN CONTEXT (fallback token) --------
-dhan_context = DhanContext(
-    client_id=CLIENT_ID,
-    access_token=ACCESS_TOKEN
-)
-dhan = dhanhq(dhan_context)
-
 IST = pytz.timezone("Asia/Kolkata")
-SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
 
+# -------- INITIAL EMPTY CONTEXT (OAuth only) --------
+dhan_context = None
+dhan = None
+
+# ---------------- STATE ----------------
+AUTH_ALERT_SENT_TODAY = False
+
+SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
 SCRIP_MASTER_DATA = None
 BN_EXPIRIES = []
 
@@ -46,6 +48,73 @@ DHAN_API_STATUS = {
 def log_now(msg):
     sys.stderr.write(f"[ALGO_ENGINE] {msg}\n")
     sys.stderr.flush()
+
+# ---------------- NOTIFICATION ----------------
+def notify_oauth_expired():
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log_now("Telegram credentials missing. Skipping notification.")
+        return
+
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": (
+                    "⚠️ Dhan OAuth expired\n\n"
+                    "Please re-authorize before market:\n"
+                    "https://mlfusion-middleware.onrender.com/oauth/start"
+                )
+            },
+            timeout=5
+        )
+    except Exception as e:
+        log_now(f"Telegram notify error: {e}")
+
+def is_auth_expired(resp=None, exc=None):
+    text = ""
+    if resp:
+        text = str(resp).lower()
+    if exc:
+        text = str(exc).lower()
+
+    return any(k in text for k in [
+        "token",
+        "auth",
+        "expired",
+        "unauthorized",
+        "invalid"
+    ])
+
+# ---------------- DAILY 8:45 CHECK ----------------
+def oauth_daily_check():
+    global AUTH_ALERT_SENT_TODAY
+
+    while True:
+        now = datetime.now(IST)
+
+        # Reset flag shortly after midnight
+        if now.hour == 0 and now.minute < 5:
+            AUTH_ALERT_SENT_TODAY = False
+
+        # Run ONLY at 08:45 IST
+        if now.hour == 8 and now.minute == 45 and not AUTH_ALERT_SENT_TODAY:
+            try:
+                resp = dhan.get_profile()
+                if resp.get("status") != "success":
+                    if is_auth_expired(resp=resp):
+                        notify_oauth_expired()
+                        AUTH_ALERT_SENT_TODAY = True
+            except Exception as e:
+                if is_auth_expired(exc=e):
+                    notify_oauth_expired()
+                    AUTH_ALERT_SENT_TODAY = True
+
+            time.sleep(70)  # avoid double trigger
+
+        time.sleep(30)
+
+threading.Thread(target=oauth_daily_check, daemon=True).start()
 
 # ---------------- OAUTH ROUTES ----------------
 @app.route("/oauth/start")
@@ -63,9 +132,7 @@ def oauth_start():
     )
 
     log_now(f"Redirecting to Dhan OAuth: {consent_url}")
-
     return redirect(consent_url)
-
 
 @app.route("/oauth/callback")
 def oauth_callback():
@@ -78,14 +145,12 @@ def oauth_callback():
 
         dhan_login = DhanLogin(CLIENT_ID)
 
-        # ⬇️ IMPORTANT: consume_token_id returns a DICT, not a string
         token_response = dhan_login.consume_token_id(
             token_id=token_id,
             app_id=DHAN_API_KEY,
             app_secret=DHAN_API_SECRET
         )
 
-        # ⬇️ Extract actual JWT string
         access_token = token_response.get("accessToken")
         if not access_token:
             raise Exception(f"Invalid token response: {token_response}")
@@ -108,120 +173,13 @@ def oauth_callback():
         log_now(f"OAuth error: {e}")
         return f"OAuth error: {str(e)}", 500
 
-
-# ---------------- SCRIP MASTER ----------------
-def load_scrip_master():
-    global SCRIP_MASTER_DATA
-    try:
-        df = pd.read_csv(SCRIP_URL, low_memory=False)
-
-        inst = next(c for c in df.columns if "INSTRUMENT" in c.upper())
-        sym  = next(c for c in df.columns if "SYMBOL" in c.upper())
-        exp  = next(c for c in df.columns if "EXPIRY_DATE" in c.upper())
-
-        mask = (
-            df[inst].str.contains("OPTIDX", na=False) &
-            df[sym].str.contains("BANKNIFTY", case=False, na=False) &
-            ~df[sym].str.contains("BANKEX", case=False, na=False)
-        )
-
-        SCRIP_MASTER_DATA = df[mask].copy()
-        SCRIP_MASTER_DATA[exp] = pd.to_datetime(SCRIP_MASTER_DATA[exp], errors="coerce")
-        SCRIP_MASTER_DATA.dropna(subset=[exp], inplace=True)
-
-        refresh_bn_expiries()
-        log_now("Scrip master loaded/refreshed")
-
-    except Exception as e:
-        log_now(f"Scrip load error: {e}")
-
-def periodic_scrip_refresh():
-    while True:
-        time.sleep(24 * 60 * 60)
-        load_scrip_master()
-
-threading.Thread(target=load_scrip_master, daemon=True).start()
-threading.Thread(target=periodic_scrip_refresh, daemon=True).start()
-
-# ---------------- EXPIRY ----------------
-def refresh_bn_expiries():
-    global BN_EXPIRIES
-    exp = next(c for c in SCRIP_MASTER_DATA.columns if "EXPIRY_DATE" in c.upper())
-    BN_EXPIRIES = sorted(SCRIP_MASTER_DATA[exp].unique())
-
-def get_current_and_next_expiry():
-    today = date.today()
-    future = [e for e in BN_EXPIRIES if e.date() >= today]
-    if len(future) >= 2:
-        return future[0], future[1]
-    if len(future) == 1:
-        return future[0], future[0]
-    return None, None
-
-def get_active_expiry_details():
-    curr, nxt = get_current_and_next_expiry()
-    if not curr:
-        return "—", None
-    dte = (curr.date() - date.today()).days
-    active = nxt if dte <= 5 else curr
-    return active.strftime("%d-%b-%Y"), dte
-
-# ---------------- ATM ----------------
-def get_atm_id(price, signal):
-    try:
-        base = round(price / 100) * 100
-        strike, opt = ((base - 100, "CE") if "BUY" in signal else (base + 100, "PE"))
-
-        cols = SCRIP_MASTER_DATA.columns
-        sc = next(c for c in cols if "STRIKE" in c.upper())
-        tc = next(c for c in cols if "OPTION_TYPE" in c.upper())
-        ec = next(c for c in cols if "EXPIRY_DATE" in c.upper())
-        ic = next(c for c in cols if "SECURITY" in c.upper() or "TOKEN" in c.upper())
-
-        curr, nxt = get_current_and_next_expiry()
-        dte = (curr.date() - date.today()).days if curr else 99
-        expiry = nxt if dte <= 5 else curr
-
-        row = SCRIP_MASTER_DATA[
-            (SCRIP_MASTER_DATA[sc] == strike) &
-            (SCRIP_MASTER_DATA[tc] == opt) &
-            (SCRIP_MASTER_DATA[ec] == expiry)
-        ]
-
-        if row.empty:
-            return None, strike, 30, "—"
-
-        return (
-            str(int(row.iloc[0][ic])),
-            strike,
-            30,
-            expiry.strftime("%d-%b-%Y")
-        )
-
-    except Exception as e:
-        log_now(f"ATM error: {e}")
-        return None, None, 30, "—"
-
-# ---------------- PRICE ----------------
-def fetch_price(sec_id=None):
-    try:
-        tb = dhan.get_trade_book()
-        if tb.get("status") != "success":
-            return None
-        for t in reversed(tb["data"]):
-            if sec_id is None or str(t["securityId"]) == str(sec_id):
-                return float(t["tradedPrice"])
-    except Exception:
-        pass
-    return None
-
 # ---------------- API HEALTH ----------------
 def check_dhan_api_status():
     try:
         resp = dhan.get_positions()
         if resp.get("status") == "success":
             DHAN_API_STATUS["state"] = "ACTIVE"
-            DHAN_API_STATUS["message"] = f"Active ({AUTH_MODE})"
+            DHAN_API_STATUS["message"] = "Active (OAUTH)"
         else:
             DHAN_API_STATUS["state"] = "ERROR"
             DHAN_API_STATUS["message"] = "API Error"
@@ -229,70 +187,17 @@ def check_dhan_api_status():
         DHAN_API_STATUS["state"] = "ERROR"
         DHAN_API_STATUS["message"] = "API Error"
 
-# ---------------- ROUTES ----------------
+# ---------------- DASHBOARD ----------------
 @app.route("/")
 def dashboard():
     check_dhan_api_status()
-    expiry, dte = get_active_expiry_details()
     return render_template_string(
         DASHBOARD_HTML,
         history=TRADE_HISTORY,
         api_state=DHAN_API_STATUS["state"],
         api_message=DHAN_API_STATUS["message"],
-        active_expiry=expiry,
-        expiry_danger=(dte is not None and dte <= 5),
         last_run=datetime.now(IST).strftime("%H:%M:%S")
     )
-
-@app.route("/mlfusion", methods=["POST"])
-def mlfusion():
-    global OPEN_TRADE_REF
-
-    data = request.get_json(force=True)
-    msg = data.get("message", "").upper()
-    price = float(data.get("price", 0))
-
-    log_now(f"MLFUSION ALERT | {msg} @ {price}")
-
-    sec, strike, qty, expiry_used = get_atm_id(price, msg)
-    if not sec:
-        return jsonify({"error": "ATM not found"}), 400
-
-    resp = dhan.place_order(
-        security_id=sec,
-        exchange_segment=dhan.NSE_FNO,
-        transaction_type=dhan.BUY,
-        quantity=qty,
-        order_type=dhan.MARKET,
-        product_type=dhan.MARGIN,
-        price=0
-    )
-
-    success = resp.get("status") == "success"
-
-    trade = {
-        "date": datetime.now(IST).strftime("%d-%b-%Y"),
-        "time": datetime.now(IST).strftime("%H:%M:%S"),
-        "price": price,
-        "strike": strike,
-        "type": "CE" if "BUY" in msg else "PE",
-        "expiry_used": expiry_used,
-        "lot_size": qty,
-        "premium_paid": "—",
-        "entry_price": "—",
-        "exit_price": "—",
-        "status": "OPEN" if success else "REJECTED",
-        "remarks": str(resp)
-    }
-
-    if success:
-        entry = fetch_price(sec)
-        trade["entry_price"] = entry
-        trade["premium_paid"] = round(entry * qty, 2) if entry else "—"
-        OPEN_TRADE_REF = trade
-
-    TRADE_HISTORY.insert(0, trade)
-    return jsonify(trade), 200
 
 # ---------------- UI ----------------
 DASHBOARD_HTML = '''
@@ -304,10 +209,6 @@ DASHBOARD_HTML = '''
 body{font-family:sans-serif;background:#f0f2f5;padding:20px}
 .status-active{background:#28a745;color:#fff;padding:2px 10px;border-radius:10px}
 .status-error{background:#f0ad4e;color:#fff;padding:2px 10px;border-radius:10px}
-.expiry-danger{color:#d9534f;font-weight:bold}
-table{width:100%;border-collapse:collapse;background:#fff;margin-top:20px}
-th{background:#333;color:#fff;padding:10px}
-td{padding:10px;border-bottom:1px solid #eee}
 </style>
 </head>
 <body>
@@ -318,29 +219,9 @@ td{padding:10px;border-bottom:1px solid #eee}
 {{ api_message }}
 </span>
 &nbsp;&nbsp;
-<b>Active BN Expiry:</b>
-<span class="{{ 'expiry-danger' if expiry_danger else '' }}">{{ active_expiry }}</span>
-&nbsp;&nbsp;
 Last Check: {{ last_run }} IST
 </div>
 
-<table>
-<tr>
-<th>Date</th><th>Time</th><th>Price</th><th>Strike</th><th>Type</th>
-<th>Expiry Used</th><th>Lot</th><th>Premium</th>
-<th>Entry</th><th>Exit</th><th>Status</th><th>Remarks</th>
-</tr>
-
-{% for t in history %}
-<tr>
-<td>{{t.date}}</td><td>{{t.time}}</td><td>{{t.price}}</td>
-<td>{{t.strike}}</td><td>{{t.type}}</td>
-<td>{{t.expiry_used}}</td><td>{{t.lot_size}}</td>
-<td>{{t.premium_paid}}</td><td>{{t.entry_price}}</td>
-<td>{{t.exit_price}}</td><td>{{t.status}}</td><td>{{t.remarks}}</td>
-</tr>
-{% endfor %}
-</table>
 </body>
 </html>
 '''
