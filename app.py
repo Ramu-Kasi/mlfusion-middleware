@@ -26,12 +26,12 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 IST = pytz.timezone("Asia/Kolkata")
 
 # =============================================================================
-# GLOBAL STATE (OAuth-only)
+# GLOBAL STATE
 # =============================================================================
 dhan = None
 dhan_context = None
 
-TRADE_HISTORY = []
+TRADE_HISTORY = []          # list of dicts (unchanged structure)
 OPEN_TRADE_REF = None
 
 AUTH_ALERT_SENT_TODAY = False
@@ -54,7 +54,6 @@ def log_now(msg):
 # =============================================================================
 def notify_oauth_expired():
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log_now("Telegram not configured")
         return
 
     try:
@@ -82,6 +81,18 @@ def is_auth_expired(resp=None, exc=None):
     return any(k in txt for k in ["token", "auth", "expired", "unauthorized", "invalid"])
 
 # =============================================================================
+# TRADE ACTIVE DAYS (RESTORED)
+# =============================================================================
+def calculate_trade_days(entry_date_str, exit_date_str=None):
+    entry_date = datetime.strptime(entry_date_str, "%Y-%m-%d").date()
+    end_date = (
+        datetime.strptime(exit_date_str, "%Y-%m-%d").date()
+        if exit_date_str
+        else datetime.now(IST).date()
+    )
+    return (end_date - entry_date).days + 1
+
+# =============================================================================
 # OAUTH WATCHDOG (SAFE)
 # =============================================================================
 def oauth_daily_check():
@@ -90,16 +101,15 @@ def oauth_daily_check():
     while True:
         now = datetime.now(IST)
 
-        # Reset alert once per day
+        # Reset flag daily
         if now.hour == 0 and now.minute < 5:
             AUTH_ALERT_SENT_TODAY = False
 
-        # 🔒 CRITICAL GUARD — wait until OAuth exists
+        # Do nothing until OAuth is completed
         if dhan is None:
             time.sleep(30)
             continue
 
-        # Single daily check
         if now.hour == 8 and now.minute == 45 and not AUTH_ALERT_SENT_TODAY:
             try:
                 resp = dhan.get_profile()
@@ -156,12 +166,14 @@ def oauth_callback():
         )
         dhan = dhanhq(dhan_context)
 
-        # Start watchdog ONLY ONCE, AFTER OAuth
         if not WATCHDOG_STARTED:
-            threading.Thread(target=oauth_daily_check, daemon=True).start()
+            threading.Thread(
+                target=oauth_daily_check,
+                daemon=True
+            ).start()
             WATCHDOG_STARTED = True
 
-        log_now("OAuth successful – system fully armed")
+        log_now("OAuth successful – system armed")
         return "✅ Dhan OAuth successful. You may close this window."
 
     except Exception as e:
@@ -172,8 +184,6 @@ def oauth_callback():
 # API STATUS
 # =============================================================================
 def check_dhan_api_status():
-    global DHAN_API_STATUS
-
     if dhan is None:
         DHAN_API_STATUS["state"] = "ERROR"
         DHAN_API_STATUS["message"] = "OAuth required"
@@ -192,7 +202,7 @@ def check_dhan_api_status():
         DHAN_API_STATUS["message"] = "API Error"
 
 # =============================================================================
-# DASHBOARD (UNCHANGED FROM BASELINE)
+# DASHBOARD
 # =============================================================================
 @app.route("/")
 def dashboard():
@@ -206,7 +216,7 @@ def dashboard():
     )
 
 # =============================================================================
-# DASHBOARD HTML — ALL COLUMNS PRESERVED
+# DASHBOARD HTML — ALL COLUMNS RESTORED
 # =============================================================================
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -239,7 +249,7 @@ th { background:#222; color:white; }
 <th>Date</th><th>Time</th><th>Price</th><th>Strike</th><th>Type</th>
 <th>Expiry Used</th><th>Lot</th><th>Premium</th>
 <th>Entry</th><th>Exit</th>
-<th>Points</th><th>PnL ₹</th>
+<th>Points</th><th>PnL ₹</th><th>Trade Days</th>
 <th>Status</th><th>Remarks</th>
 </tr>
 
@@ -257,6 +267,7 @@ th { background:#222; color:white; }
 <td>{{ row.Exit }}</td>
 <td>{{ row.Points }}</td>
 <td class="{{ 'green' if row.PnL >= 0 else 'red' }}">{{ row.PnL }}</td>
+<td>{{ row.TradeDays }}</td>
 <td>{{ row.Status }}</td>
 <td>{{ row.Remarks }}</td>
 </tr>
