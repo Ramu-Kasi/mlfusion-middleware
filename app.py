@@ -3,8 +3,7 @@ import sys
 import time
 import pandas as pd
 from flask import Flask, request, jsonify, render_template_string
-from dhanhq import dhanhq
-from dhanhq.context import DhanContext
+from dhanhq import dhanhq, DhanContext
 from datetime import datetime, date
 import pytz
 import threading
