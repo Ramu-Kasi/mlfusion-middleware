@@ -91,6 +91,44 @@ def get_active_expiry_details():
     active = nxt if dte <= 5 else curr
     return active.strftime("%d-%b-%Y"), dte
 
+# ---------------- ATM (FIXED) ----------------
+def get_atm_id(price, signal):
+    try:
+        base = round(price / 100) * 100
+        strike, opt = (
+            (base - 100, "CE") if "BUY" in signal else (base + 100, "PE")
+        )
+
+        cols = SCRIP_MASTER_DATA.columns
+        sc = next(c for c in cols if "STRIKE" in c.upper())
+        tc = next(c for c in cols if "OPTION_TYPE" in c.upper())
+        ec = next(c for c in cols if "EXPIRY_DATE" in c.upper())
+        ic = next(c for c in cols if "SECURITY" in c.upper() or "TOKEN" in c.upper())
+
+        curr, nxt = get_current_and_next_expiry()
+        dte = (curr.date() - date.today()).days if curr else 99
+        expiry = nxt if dte <= 5 else curr
+
+        row = SCRIP_MASTER_DATA[
+            (SCRIP_MASTER_DATA[sc] == strike) &
+            (SCRIP_MASTER_DATA[tc] == opt) &
+            (SCRIP_MASTER_DATA[ec] == expiry)
+        ]
+
+        if row.empty:
+            return None, strike, 30, "—"
+
+        return (
+            str(int(row.iloc[0][ic])),
+            strike,
+            30,
+            expiry.strftime("%d-%b-%Y")
+        )
+
+    except Exception as e:
+        log_now(f"ATM error: {e}")
+        return None, None, 30, "—"
+
 # ---------------- PRICE ----------------
 def fetch_price(sec_id=None):
     try:
