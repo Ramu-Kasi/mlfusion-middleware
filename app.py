@@ -91,8 +91,39 @@ def get_active_expiry_details():
     active = nxt if dte <= 5 else curr
     return active.strftime("%d-%b-%Y"), dte
 
+# ---------------- ATM ----------------
+def get_atm_id(price, signal):
+    try:
+        base = round(price / 100) * 100
+        strike, opt = (base - 100, "CE") if "BUY" in signal else (base + 100, "PE")
+
+        cols = SCRIP_MASTER_DATA.columns
+        sc = next(c for c in cols if "STRIKE" in c.upper())
+        tc = next(c for c in cols if "OPTION_TYPE" in c.upper())
+        ec = next(c for c in cols if "EXPIRY_DATE" in c.upper())
+        ic = next(c for c in cols if "SECURITY" in c.upper() or "TOKEN" in c.upper())
+
+        curr, nxt = get_current_and_next_expiry()
+        dte = (curr.date() - datetime.now(IST).date()).days if curr else 99
+        expiry = nxt if dte <= 5 else curr
+
+        row = SCRIP_MASTER_DATA[
+            (SCRIP_MASTER_DATA[sc] == strike) &
+            (SCRIP_MASTER_DATA[tc] == opt) &
+            (SCRIP_MASTER_DATA[ec] == expiry)
+        ]
+
+        if row.empty:
+            return None, strike, 30, "—"
+
+        return str(int(row.iloc[0][ic])), strike, 30, expiry.strftime("%d-%b-%Y")
+
+    except Exception as e:
+        log_now(f"ATM error: {e}")
+        return None, None, 30, "—"
+
 # ---------------- PRICE ----------------
-def fetch_price(sec_id):
+def fetch_price(sec_id=None):
     try:
         tb = dhan.get_trade_book()
         if tb.get("status") != "success":
@@ -123,7 +154,7 @@ def check_dhan_api_status():
         DHAN_API_STATUS["state"] = "ERROR"
         DHAN_API_STATUS["message"] = "API Error"
 
-# ---------------- FORCED EXIT DETECTION ----------------
+# ---------------- FORCED EXIT ----------------
 def detect_forced_exit():
     global OPEN_TRADE_REF
 
@@ -135,15 +166,13 @@ def detect_forced_exit():
         if pos.get("status") != "success":
             return
 
-        bn_open = False
-        for p in pos["data"]:
-            if "BANKNIFTY" in p["tradingSymbol"] and int(p["netQty"]) != 0:
-                bn_open = True
-                break
+        bn_open = any(
+            "BANKNIFTY" in p["tradingSymbol"] and int(p["netQty"]) != 0
+            for p in pos["data"]
+        )
 
-        # Position gone → forced exit
         if not bn_open:
-            OPEN_TRADE_REF["exit_price"] = fetch_price(None) or "—"
+            OPEN_TRADE_REF["exit_price"] = fetch_price()
             OPEN_TRADE_REF["status"] = "CLOSED"
             OPEN_TRADE_REF["remarks"] = "FORCED EXIT"
             OPEN_TRADE_REF = None
@@ -155,7 +184,7 @@ def detect_forced_exit():
 @app.route("/")
 def dashboard():
     check_dhan_api_status()
-    detect_forced_exit()   # <<< KEY ADDITION
+    detect_forced_exit()
     expiry, dte = get_active_expiry_details()
     return render_template_string(
         DASHBOARD_HTML,
@@ -166,6 +195,57 @@ def dashboard():
         expiry_danger=(dte is not None and dte <= 5),
         last_run=datetime.now(IST).strftime("%H:%M:%S")
     )
+
+@app.route("/mlfusion", methods=["POST"])
+def mlfusion():
+    global OPEN_TRADE_REF
+    data = request.get_json(force=True)
+
+    msg = data.get("message", "").upper()
+    price = float(data.get("price", 0))
+
+    log_now(f"MLFUSION ALERT | {msg} @ {price}")
+
+    detect_forced_exit()
+
+    sec, strike, qty, expiry_used = get_atm_id(price, msg)
+    if not sec:
+        return jsonify({"error": "ATM not found"}), 400
+
+    resp = dhan.place_order(
+        security_id=sec,
+        exchange_segment=dhan.NSE_FNO,
+        transaction_type=dhan.BUY,
+        quantity=qty,
+        order_type=dhan.MARKET,
+        product_type=dhan.MARGIN,
+        price=0
+    )
+
+    success = resp.get("status") == "success"
+
+    trade = {
+        "time": datetime.now(IST).strftime("%H:%M:%S"),
+        "price": price,
+        "strike": strike,
+        "type": "CE" if "BUY" in msg else "PE",
+        "expiry_used": expiry_used,
+        "lot_size": qty,
+        "premium_paid": "—",
+        "entry_price": "—",
+        "exit_price": "—",
+        "status": "OPEN" if success else "REJECTED",
+        "remarks": str(resp)
+    }
+
+    if success:
+        entry = fetch_price(sec)
+        trade["entry_price"] = entry
+        trade["premium_paid"] = round(entry * qty, 2) if entry else "—"
+        OPEN_TRADE_REF = trade
+
+    TRADE_HISTORY.insert(0, trade)
+    return jsonify(trade), 200
 
 # ---------------- UI ----------------
 DASHBOARD_HTML = '''
@@ -207,36 +287,25 @@ td{padding:10px;border-bottom:1px solid #eee}
 
 {% for t in history %}
 <tr>
-<td>{{t.time}}</td>
-<td>{{t.price}}</td>
-<td>{{t.strike}}</td>
-<td>{{t.type}}</td>
-<td>{{t.expiry_used}}</td>
-<td>{{t.lot_size}}</td>
-<td>{{t.premium_paid}}</td>
-<td>{{t.entry_price}}</td>
-<td>{{t.exit_price}}</td>
+<td>{{t.time}}</td><td>{{t.price}}</td><td>{{t.strike}}</td><td>{{t.type}}</td>
+<td>{{t.expiry_used}}</td><td>{{t.lot_size}}</td><td>{{t.premium_paid}}</td>
+<td>{{t.entry_price}}</td><td>{{t.exit_price}}</td>
 
 {% if t.entry_price != '—' and t.exit_price != '—' %}
 {% set pts = t.exit_price - t.entry_price %}
 <td>{{ pts }}</td>
 <td style="background-color:
-    {{ 'lightgreen' if pts * t.lot_size > 0 else
-       'lightcoral' if pts * t.lot_size < 0 else
-       'lightyellow' }}">
+{{ 'lightgreen' if pts * t.lot_size > 0 else 'lightcoral' if pts * t.lot_size < 0 else 'lightyellow' }}">
 ₹{{ pts * t.lot_size }}
 </td>
 {% else %}
-<td>—</td>
-<td style="background-color:lightyellow">—</td>
+<td>—</td><td style="background-color:lightyellow">—</td>
 {% endif %}
 
-<td>{{t.status}}</td>
-<td>{{t.remarks}}</td>
+<td>{{t.status}}</td><td>{{t.remarks}}</td>
 </tr>
 {% endfor %}
 </table>
-
 </body>
 </html>
 '''
