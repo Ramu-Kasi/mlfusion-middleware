@@ -164,40 +164,32 @@ def check_dhan_api_status():
 # ---------------- FORCED EXIT ----------------
 def detect_forced_exit():
     global OPEN_TRADE_REF
-
     if not OPEN_TRADE_REF:
         return
-
     try:
         pos = dhan.get_positions()
         if pos.get("status") != "success":
             return
-
         bn_open = any(
             "BANKNIFTY" in p["tradingSymbol"] and int(p["netQty"]) != 0
             for p in pos["data"]
         )
-
         if not bn_open:
             OPEN_TRADE_REF["exit_price"] = fetch_price()
             OPEN_TRADE_REF["status"] = "CLOSED"
             OPEN_TRADE_REF["remarks"] = "FORCED EXIT"
             OPEN_TRADE_REF = None
-
     except Exception:
         pass
 
-# ---------------- TRADE ACTIVE DAYS (FIXED) ----------------
+# ---------------- TRADE ACTIVE DAYS ----------------
 def trade_active_days(trade):
     try:
-        # Rejected trades were never active
         if trade.get("status") == "REJECTED" or trade.get("entry_price") in ["—", None]:
             return "—"
-
         start = datetime.strptime(trade["date"], "%d-%b-%Y").date()
         end = date.today()
         return (end - start).days + 1
-
     except Exception:
         return "—"
 
@@ -222,12 +214,10 @@ def dashboard():
 def mlfusion():
     global OPEN_TRADE_REF
     data = request.get_json(force=True)
-
     msg = data.get("message", "").upper()
     price = float(data.get("price", 0))
 
     log_now(f"MLFUSION ALERT | {msg} @ {price}")
-
     detect_forced_exit()
 
     sec, strike, qty, expiry_used = get_atm_id(price, msg)
@@ -278,7 +268,7 @@ DASHBOARD_HTML = '''
 <meta http-equiv="refresh" content="60">
 <style>
 body{font-family:sans-serif;background:#f0f2f5;padding:20px}
-.status-bar{background:#fff;padding:15px;border-radius:8px;display:flex;gap:20px}
+.status-bar{background:#fff;padding:15px;border-radius:8px;display:flex;gap:20px;align-items:center}
 .status-active{background:#28a745;color:#fff;padding:2px 10px;border-radius:10px}
 .status-expired{background:#d9534f;color:#fff;padding:2px 10px;border-radius:10px}
 .status-error{background:#f0ad4e;color:#fff;padding:2px 10px;border-radius:10px}
@@ -291,13 +281,23 @@ td{padding:10px;border-bottom:1px solid #eee}
 <body>
 
 <div class="status-bar">
-<b>Dhan API:</b>
-<span class="{% if api_state=='ACTIVE' %}status-active{% elif api_state=='EXPIRED' %}status-expired{% else %}status-error{% endif %}">
-{{ api_message }}
-</span>
-<b>Active BN Expiry:</b>
-<span class="{{ 'expiry-danger' if expiry_danger else '' }}">{{ active_expiry }}</span>
-<span style="margin-left:auto">Last Check: {{ last_run }} IST</span>
+    <div>
+        <b>Dhan API:</b>
+        <span class="{% if api_state=='ACTIVE' %}status-active{% elif api_state=='EXPIRED' %}status-expired{% else %}status-error{% endif %}">
+            {{ api_message }}
+        </span>
+        &nbsp;&nbsp;
+        <b>Active BN Expiry:</b>
+        <span class="{{ 'expiry-danger' if expiry_danger else '' }}">{{ active_expiry }}</span>
+    </div>
+
+    <div style="margin: 0 auto; font-weight: 600;">
+        Ramu’s Magic Journal
+    </div>
+
+    <div>
+        Last Check: {{ last_run }} IST
+    </div>
 </div>
 
 <table>
