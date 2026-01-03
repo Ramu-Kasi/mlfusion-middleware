@@ -4,7 +4,7 @@ import time
 import pandas as pd
 from flask import Flask, request, jsonify, render_template_string
 from dhanhq import dhanhq
-from datetime import datetime
+from datetime import datetime, date
 import pytz
 import threading
 
@@ -75,7 +75,7 @@ def refresh_bn_expiries():
     BN_EXPIRIES = sorted(SCRIP_MASTER_DATA[exp].unique())
 
 def get_current_and_next_expiry():
-    today = datetime.now(IST).date()
+    today = date.today()
     future = [e for e in BN_EXPIRIES if e.date() >= today]
     if len(future) >= 2:
         return future[0], future[1]
@@ -87,40 +87,9 @@ def get_active_expiry_details():
     curr, nxt = get_current_and_next_expiry()
     if not curr:
         return "—", None
-    dte = (curr.date() - datetime.now(IST).date()).days
+    dte = (curr.date() - date.today()).days
     active = nxt if dte <= 5 else curr
     return active.strftime("%d-%b-%Y"), dte
-
-# ---------------- ATM ----------------
-def get_atm_id(price, signal):
-    try:
-        base = round(price / 100) * 100
-        strike, opt = (base - 100, "CE") if "BUY" in signal else (base + 100, "PE")
-
-        cols = SCRIP_MASTER_DATA.columns
-        sc = next(c for c in cols if "STRIKE" in c.upper())
-        tc = next(c for c in cols if "OPTION_TYPE" in c.upper())
-        ec = next(c for c in cols if "EXPIRY_DATE" in c.upper())
-        ic = next(c for c in cols if "SECURITY" in c.upper() or "TOKEN" in c.upper())
-
-        curr, nxt = get_current_and_next_expiry()
-        dte = (curr.date() - datetime.now(IST).date()).days if curr else 99
-        expiry = nxt if dte <= 5 else curr
-
-        row = SCRIP_MASTER_DATA[
-            (SCRIP_MASTER_DATA[sc] == strike) &
-            (SCRIP_MASTER_DATA[tc] == opt) &
-            (SCRIP_MASTER_DATA[ec] == expiry)
-        ]
-
-        if row.empty:
-            return None, strike, 30, "—"
-
-        return str(int(row.iloc[0][ic])), strike, 30, expiry.strftime("%d-%b-%Y")
-
-    except Exception as e:
-        log_now(f"ATM error: {e}")
-        return None, None, 30, "—"
 
 # ---------------- PRICE ----------------
 def fetch_price(sec_id=None):
@@ -180,6 +149,15 @@ def detect_forced_exit():
     except Exception:
         pass
 
+# ---------------- ACTIVE DAYS ----------------
+def trade_active_days(trade):
+    try:
+        start = datetime.strptime(trade["date"], "%d-%b-%Y").date()
+        end = date.today()
+        return (end - start).days + 1
+    except Exception:
+        return "—"
+
 # ---------------- ROUTES ----------------
 @app.route("/")
 def dashboard():
@@ -189,6 +167,7 @@ def dashboard():
     return render_template_string(
         DASHBOARD_HTML,
         history=TRADE_HISTORY,
+        trade_active_days=trade_active_days,
         api_state=DHAN_API_STATUS["state"],
         api_message=DHAN_API_STATUS["message"],
         active_expiry=expiry,
@@ -225,6 +204,7 @@ def mlfusion():
     success = resp.get("status") == "success"
 
     trade = {
+        "date": datetime.now(IST).strftime("%d-%b-%Y"),
         "time": datetime.now(IST).strftime("%H:%M:%S"),
         "price": price,
         "strike": strike,
@@ -279,15 +259,15 @@ td{padding:10px;border-bottom:1px solid #eee}
 
 <table>
 <tr>
-<th>Time</th><th>Price</th><th>Strike</th><th>Type</th><th>Expiry Used</th>
+<th>Date</th><th>Time</th><th>Price</th><th>Strike</th><th>Type</th><th>Expiry Used</th>
 <th>Lot</th><th>Premium</th><th>Entry</th><th>Exit</th>
-<th>Points Captured</th><th>PnL</th>
+<th>Points Captured</th><th>PnL</th><th>Trade Active Days</th>
 <th>Status</th><th>Remarks</th>
 </tr>
 
 {% for t in history %}
 <tr>
-<td>{{t.time}}</td><td>{{t.price}}</td><td>{{t.strike}}</td><td>{{t.type}}</td>
+<td>{{t.date}}</td><td>{{t.time}}</td><td>{{t.price}}</td><td>{{t.strike}}</td><td>{{t.type}}</td>
 <td>{{t.expiry_used}}</td><td>{{t.lot_size}}</td><td>{{t.premium_paid}}</td>
 <td>{{t.entry_price}}</td><td>{{t.exit_price}}</td>
 
@@ -302,6 +282,7 @@ td{padding:10px;border-bottom:1px solid #eee}
 <td>—</td><td style="background-color:lightyellow">—</td>
 {% endif %}
 
+<td>{{ trade_active_days(t) }}</td>
 <td>{{t.status}}</td><td>{{t.remarks}}</td>
 </tr>
 {% endfor %}
