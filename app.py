@@ -91,7 +91,7 @@ def get_active_expiry_details():
     active = nxt if dte <= 5 else curr
     return active.strftime("%d-%b-%Y"), dte
 
-# ---------------- ATM (FIXED) ----------------
+# ---------------- ATM ----------------
 def get_atm_id(price, signal):
     try:
         base = round(price / 100) * 100
@@ -187,12 +187,17 @@ def detect_forced_exit():
     except Exception:
         pass
 
-# ---------------- ACTIVE DAYS ----------------
+# ---------------- TRADE ACTIVE DAYS (FIXED) ----------------
 def trade_active_days(trade):
     try:
+        # Rejected trades were never active
+        if trade.get("status") == "REJECTED" or trade.get("entry_price") in ["—", None]:
+            return "—"
+
         start = datetime.strptime(trade["date"], "%d-%b-%Y").date()
         end = date.today()
         return (end - start).days + 1
+
     except Exception:
         return "—"
 
