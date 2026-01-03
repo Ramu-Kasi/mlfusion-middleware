@@ -77,16 +77,24 @@ def oauth_callback():
             return "OAuth failed: token_id missing", 400
 
         dhan_login = DhanLogin(CLIENT_ID)
-        access_token = dhan_login.consume_token_id(
+
+        # ⬇️ IMPORTANT: consume_token_id returns a DICT, not a string
+        token_response = dhan_login.consume_token_id(
             token_id=token_id,
             app_id=DHAN_API_KEY,
             app_secret=DHAN_API_SECRET
         )
 
+        # ⬇️ Extract actual JWT string
+        access_token = token_response.get("accessToken")
+        if not access_token:
+            raise Exception(f"Invalid token response: {token_response}")
+
         dhan_context = DhanContext(
             client_id=CLIENT_ID,
             access_token=access_token
         )
+
         dhan = dhanhq(dhan_context)
 
         AUTH_MODE = "OAUTH"
@@ -99,6 +107,7 @@ def oauth_callback():
         AUTH_STATUS = "FAILED"
         log_now(f"OAuth error: {e}")
         return f"OAuth error: {str(e)}", 500
+
 
 # ---------------- SCRIP MASTER ----------------
 def load_scrip_master():
