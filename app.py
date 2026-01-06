@@ -18,34 +18,28 @@ dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 IST = pytz.timezone("Asia/Kolkata")
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
 
-# ---------------- TOKEN TIMING (NEW LOGIC) ----------------
-# Token validity is assumed as 24 hours from app start time
+# ---------------- TOKEN TIMER (NEW) ----------------
 TOKEN_VALIDITY_HOURS = 24
 TOKEN_GENERATED_AT = datetime.now(IST)
 
-def get_token_expiry_status():
-    """
-    Calculates how much time is left before token expiry.
-    Used ONLY for dashboard visibility.
-    """
-    expiry_time = TOKEN_GENERATED_AT + timedelta(hours=TOKEN_VALIDITY_HOURS)
-    remaining = expiry_time - datetime.now(IST)
+def get_token_status():
+    expiry = TOKEN_GENERATED_AT + timedelta(hours=TOKEN_VALIDITY_HOURS)
+    remaining = expiry - datetime.now(IST)
 
     if remaining.total_seconds() <= 0:
-        return {"state": "EXPIRED", "label": "Expired – Update Required"}
+        return {"state": "EXPIRED", "label": "Expired"}
     elif remaining.total_seconds() <= 2 * 3600:
-        hrs = remaining.seconds // 3600
-        mins = (remaining.seconds % 3600) // 60
-        return {"state": "SOON", "label": f"Expiring Soon ({hrs}h {mins}m)"}
+        h = remaining.seconds // 3600
+        m = (remaining.seconds % 3600) // 60
+        return {"state": "SOON", "label": f"Expiring Soon ({h}h {m}m)"}
     else:
-        hrs = remaining.seconds // 3600
-        mins = (remaining.seconds % 3600) // 60
-        return {"state": "ACTIVE", "label": f"Expires in {hrs}h {mins}m"}
+        h = remaining.seconds // 3600
+        m = (remaining.seconds % 3600) // 60
+        return {"state": "ACTIVE", "label": f"Expires in {h}h {m}m"}
 
-# ---------------- DATA ----------------
+# ---------------- GLOBALS ----------------
 SCRIP_MASTER_DATA = None
 BN_EXPIRIES = []
-
 TRADE_HISTORY = []
 OPEN_TRADE_REF = None
 
@@ -80,7 +74,7 @@ def load_scrip_master():
         SCRIP_MASTER_DATA.dropna(subset=[exp], inplace=True)
 
         refresh_bn_expiries()
-        log_now("Scrip master loaded/refreshed")
+        log_now("Scrip master loaded")
 
     except Exception as e:
         log_now(f"Scrip load error: {e}")
@@ -118,29 +112,34 @@ def get_active_expiry_details():
 
 # ---------------- ATM ----------------
 def get_atm_id(price, signal):
-    base = round(price / 100) * 100
-    strike, opt = ((base - 100, "CE") if "BUY" in signal else (base + 100, "PE"))
+    try:
+        base = round(price / 100) * 100
+        strike, opt = (base - 100, "CE") if "BUY" in signal else (base + 100, "PE")
 
-    cols = SCRIP_MASTER_DATA.columns
-    sc = next(c for c in cols if "STRIKE" in c.upper())
-    tc = next(c for c in cols if "OPTION_TYPE" in c.upper())
-    ec = next(c for c in cols if "EXPIRY_DATE" in c.upper())
-    ic = next(c for c in cols if "SECURITY" in c.upper() or "TOKEN" in c.upper())
+        cols = SCRIP_MASTER_DATA.columns
+        sc = next(c for c in cols if "STRIKE" in c.upper())
+        tc = next(c for c in cols if "OPTION_TYPE" in c.upper())
+        ec = next(c for c in cols if "EXPIRY_DATE" in c.upper())
+        ic = next(c for c in cols if "SECURITY" in c.upper() or "TOKEN" in c.upper())
 
-    curr, nxt = get_current_and_next_expiry()
-    dte = (curr.date() - date.today()).days if curr else 99
-    expiry = nxt if dte <= 5 else curr
+        curr, nxt = get_current_and_next_expiry()
+        dte = (curr.date() - date.today()).days if curr else 99
+        expiry = nxt if dte <= 5 else curr
 
-    row = SCRIP_MASTER_DATA[
-        (SCRIP_MASTER_DATA[sc] == strike) &
-        (SCRIP_MASTER_DATA[tc] == opt) &
-        (SCRIP_MASTER_DATA[ec] == expiry)
-    ]
+        row = SCRIP_MASTER_DATA[
+            (SCRIP_MASTER_DATA[sc] == strike) &
+            (SCRIP_MASTER_DATA[tc] == opt) &
+            (SCRIP_MASTER_DATA[ec] == expiry)
+        ]
 
-    if row.empty:
-        return None, strike, 30, "—"
+        if row.empty:
+            return None, strike, 30, "—"
 
-    return str(int(row.iloc[0][ic])), strike, 30, expiry.strftime("%d-%b-%Y")
+        return str(int(row.iloc[0][ic])), strike, 30, expiry.strftime("%d-%b-%Y")
+
+    except Exception as e:
+        log_now(f"ATM error: {e}")
+        return None, None, 30, "—"
 
 # ---------------- PRICE ----------------
 def fetch_price(sec_id=None):
@@ -169,21 +168,19 @@ def check_dhan_api_status():
         DHAN_API_STATUS["state"] = "ERROR"
         DHAN_API_STATUS["message"] = "API Error"
 
-# ---------------- EXIT OPPOSITE POSITION (NEW LOGIC) ----------------
-def exit_opposite_position(expected_type):
-    """
-    Ensures any opposite position is closed BEFORE entering a new one.
-    Returns True if safe to proceed, False if exit failed.
-    """
+# ---------------- EXIT BEFORE ENTRY (NEW) ----------------
+def exit_opposite(expected_type):
     global OPEN_TRADE_REF
 
-    if not OPEN_TRADE_REF or OPEN_TRADE_REF["type"] == expected_type:
-        return True  # Nothing to exit
+    if not OPEN_TRADE_REF:
+        return True
 
-    log_now("Opposite position detected, attempting exit first")
+    if OPEN_TRADE_REF["type"] == expected_type:
+        return True
+
+    log_now("Reversal detected → exiting open trade FIRST")
 
     try:
-        # Exit by selling existing position at market
         dhan.place_order(
             security_id=OPEN_TRADE_REF["security_id"],
             exchange_segment=dhan.NSE_FNO,
@@ -194,12 +191,11 @@ def exit_opposite_position(expected_type):
             price=0
         )
 
-        time.sleep(1)  # Ensure exit happens before new entry
+        time.sleep(1)  # STRICT sequencing safety
 
-        OPEN_TRADE_REF["exit_price"] = fetch_price(OPEN_TRADE_REF["security_id"])
+        OPEN_TRADE_REF["exit_price"] = fetch_price()
         OPEN_TRADE_REF["status"] = "CLOSED"
         OPEN_TRADE_REF["remarks"] = "EXIT ON REVERSAL"
-
         OPEN_TRADE_REF = None
         return True
 
@@ -207,19 +203,30 @@ def exit_opposite_position(expected_type):
         log_now(f"Exit failed: {e}")
         return False
 
+# ---------------- TRADE ACTIVE DAYS ----------------
+def trade_active_days(trade):
+    try:
+        if trade.get("status") == "REJECTED" or trade.get("entry_price") in ["—", None]:
+            return "—"
+        start = datetime.strptime(trade["date"], "%d-%b-%Y").date()
+        return (date.today() - start).days + 1
+    except Exception:
+        return "—"
+
 # ---------------- ROUTES ----------------
 @app.route("/")
 def dashboard():
     check_dhan_api_status()
-    token_info = get_token_expiry_status()
     expiry, dte = get_active_expiry_details()
+    token = get_token_status()
 
     return render_template_string(
         DASHBOARD_HTML,
         history=TRADE_HISTORY,
+        trade_active_days=trade_active_days,
         api_state=DHAN_API_STATUS["state"],
         api_message=DHAN_API_STATUS["message"],
-        token=token_info,
+        token=token,
         active_expiry=expiry,
         expiry_danger=(dte is not None and dte <= 5),
         last_run=datetime.now(IST).strftime("%H:%M:%S")
@@ -233,13 +240,12 @@ def mlfusion():
     msg = data.get("message", "").upper()
     price = float(data.get("price", 0))
 
-    log_now(f"MLFUSION ALERT | {msg} @ {price}")
+    log_now(f"MLFUSION | {msg} @ {price}")
 
     expected_type = "CE" if "BUY" in msg else "PE"
 
-    # NEW LOGIC: exit opposite position before entry
-    if not exit_opposite_position(expected_type):
-        return jsonify({"error": "Exit failed, trade blocked"}), 400
+    if not exit_opposite(expected_type):
+        return jsonify({"error": "Exit failed"}), 400
 
     sec, strike, qty, expiry_used = get_atm_id(price, msg)
     if not sec:
@@ -265,6 +271,7 @@ def mlfusion():
         "type": expected_type,
         "expiry_used": expiry_used,
         "lot_size": qty,
+        "premium_paid": "—",
         "entry_price": "—",
         "exit_price": "—",
         "status": "OPEN" if success else "REJECTED",
@@ -273,7 +280,9 @@ def mlfusion():
     }
 
     if success:
-        trade["entry_price"] = fetch_price(sec)
+        entry = fetch_price(sec)
+        trade["entry_price"] = entry
+        trade["premium_paid"] = round(entry * qty, 2) if entry else "—"
         OPEN_TRADE_REF = trade
 
     TRADE_HISTORY.insert(0, trade)
@@ -286,16 +295,27 @@ DASHBOARD_HTML = '''
 <head>
 <meta http-equiv="refresh" content="60">
 <style>
-.status-active{background:#28a745;color:#fff;padding:2px 8px;border-radius:8px}
-.status-soon{background:#f0ad4e;color:#fff;padding:2px 8px;border-radius:8px}
-.status-expired{background:#d9534f;color:#fff;padding:2px 8px;border-radius:8px}
+body{font-family:sans-serif;background:#f0f2f5;padding:20px}
+.status-bar{background:#fff;padding:15px;border-radius:8px;display:flex;gap:20px;align-items:center}
+.status-active{background:#28a745;color:#fff;padding:2px 10px;border-radius:10px}
+.status-expired{background:#d9534f;color:#fff;padding:2px 10px;border-radius:10px}
+.status-soon{background:#f0ad4e;color:#fff;padding:2px 10px;border-radius:10px}
+.expiry-danger{color:#d9534f;font-weight:bold}
+.journal-title{font-family:Georgia,serif;font-size:21px;color:#b08d57}
+table{width:100%;border-collapse:collapse;background:#fff;margin-top:20px}
+th{background:#333;color:#fff;padding:10px}
+td{padding:10px;border-bottom:1px solid #eee}
 </style>
 </head>
 <body>
 
-<b>Dhan API:</b> {{ api_message }}
-&nbsp;&nbsp;
-<b>Token:</b>
+<div class="status-bar">
+<b>Dhan API:</b>
+<span class="{% if api_state=='ACTIVE' %}status-active{% else %}status-expired{% endif %}">
+{{ api_message }}
+</span>
+
+&nbsp;&nbsp;<b>Token:</b>
 <span class="
 {% if token.state=='ACTIVE' %}status-active
 {% elif token.state=='SOON' %}status-soon
@@ -304,6 +324,42 @@ DASHBOARD_HTML = '''
 {{ token.label }}
 </span>
 
+&nbsp;&nbsp;<b>Active BN Expiry:</b>
+<span class="{{ 'expiry-danger' if expiry_danger else '' }}">{{ active_expiry }}</span>
+
+<div class="journal-title" style="margin:0 auto;">Ramu’s Magic Journal</div>
+<div>Last Check: {{ last_run }} IST</div>
+</div>
+
+<table>
+<tr>
+<th>Date</th><th>Time</th><th>Price</th><th>Strike</th><th>Type</th><th>Expiry Used</th>
+<th>Lot</th><th>Premium</th><th>Entry</th><th>Exit</th>
+<th>Points</th><th>PnL</th><th>Days</th><th>Status</th><th>Remarks</th>
+</tr>
+
+{% for t in history %}
+<tr>
+<td>{{t.date}}</td><td>{{t.time}}</td><td>{{t.price}}</td><td>{{t.strike}}</td><td>{{t.type}}</td>
+<td>{{t.expiry_used}}</td><td>{{t.lot_size}}</td><td>{{t.premium_paid}}</td>
+<td>{{t.entry_price}}</td><td>{{t.exit_price}}</td>
+
+{% if t.entry_price != '—' and t.exit_price != '—' %}
+{% set pts = t.exit_price - t.entry_price %}
+<td>{{ pts }}</td>
+<td style="background-color:
+{{ 'lightgreen' if pts * t.lot_size > 0 else 'lightcoral' if pts * t.lot_size < 0 else 'lightyellow' }}">
+₹{{ pts * t.lot_size }}
+</td>
+{% else %}
+<td>—</td><td style="background-color:lightyellow">—</td>
+{% endif %}
+
+<td>{{ trade_active_days(t) }}</td>
+<td>{{t.status}}</td><td>{{t.remarks}}</td>
+</tr>
+{% endfor %}
+</table>
 </body>
 </html>
 '''
