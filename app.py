@@ -4,7 +4,7 @@ import time
 import pandas as pd
 from flask import Flask, request, jsonify, render_template_string
 from dhanhq import dhanhq
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import pytz
 import threading
 
@@ -18,6 +18,31 @@ dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 IST = pytz.timezone("Asia/Kolkata")
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
 
+# ---------------- TOKEN TIMING (NEW LOGIC) ----------------
+# Token validity is assumed as 24 hours from app start time
+TOKEN_VALIDITY_HOURS = 24
+TOKEN_GENERATED_AT = datetime.now(IST)
+
+def get_token_expiry_status():
+    """
+    Calculates how much time is left before token expiry.
+    Used ONLY for dashboard visibility.
+    """
+    expiry_time = TOKEN_GENERATED_AT + timedelta(hours=TOKEN_VALIDITY_HOURS)
+    remaining = expiry_time - datetime.now(IST)
+
+    if remaining.total_seconds() <= 0:
+        return {"state": "EXPIRED", "label": "Expired – Update Required"}
+    elif remaining.total_seconds() <= 2 * 3600:
+        hrs = remaining.seconds // 3600
+        mins = (remaining.seconds % 3600) // 60
+        return {"state": "SOON", "label": f"Expiring Soon ({hrs}h {mins}m)"}
+    else:
+        hrs = remaining.seconds // 3600
+        mins = (remaining.seconds % 3600) // 60
+        return {"state": "ACTIVE", "label": f"Expires in {hrs}h {mins}m"}
+
+# ---------------- DATA ----------------
 SCRIP_MASTER_DATA = None
 BN_EXPIRIES = []
 
@@ -93,41 +118,29 @@ def get_active_expiry_details():
 
 # ---------------- ATM ----------------
 def get_atm_id(price, signal):
-    try:
-        base = round(price / 100) * 100
-        strike, opt = (
-            (base - 100, "CE") if "BUY" in signal else (base + 100, "PE")
-        )
+    base = round(price / 100) * 100
+    strike, opt = ((base - 100, "CE") if "BUY" in signal else (base + 100, "PE"))
 
-        cols = SCRIP_MASTER_DATA.columns
-        sc = next(c for c in cols if "STRIKE" in c.upper())
-        tc = next(c for c in cols if "OPTION_TYPE" in c.upper())
-        ec = next(c for c in cols if "EXPIRY_DATE" in c.upper())
-        ic = next(c for c in cols if "SECURITY" in c.upper() or "TOKEN" in c.upper())
+    cols = SCRIP_MASTER_DATA.columns
+    sc = next(c for c in cols if "STRIKE" in c.upper())
+    tc = next(c for c in cols if "OPTION_TYPE" in c.upper())
+    ec = next(c for c in cols if "EXPIRY_DATE" in c.upper())
+    ic = next(c for c in cols if "SECURITY" in c.upper() or "TOKEN" in c.upper())
 
-        curr, nxt = get_current_and_next_expiry()
-        dte = (curr.date() - date.today()).days if curr else 99
-        expiry = nxt if dte <= 5 else curr
+    curr, nxt = get_current_and_next_expiry()
+    dte = (curr.date() - date.today()).days if curr else 99
+    expiry = nxt if dte <= 5 else curr
 
-        row = SCRIP_MASTER_DATA[
-            (SCRIP_MASTER_DATA[sc] == strike) &
-            (SCRIP_MASTER_DATA[tc] == opt) &
-            (SCRIP_MASTER_DATA[ec] == expiry)
-        ]
+    row = SCRIP_MASTER_DATA[
+        (SCRIP_MASTER_DATA[sc] == strike) &
+        (SCRIP_MASTER_DATA[tc] == opt) &
+        (SCRIP_MASTER_DATA[ec] == expiry)
+    ]
 
-        if row.empty:
-            return None, strike, 30, "—"
+    if row.empty:
+        return None, strike, 30, "—"
 
-        return (
-            str(int(row.iloc[0][ic])),
-            strike,
-            30,
-            expiry.strftime("%d-%b-%Y")
-        )
-
-    except Exception as e:
-        log_now(f"ATM error: {e}")
-        return None, None, 30, "—"
+    return str(int(row.iloc[0][ic])), strike, 30, expiry.strftime("%d-%b-%Y")
 
 # ---------------- PRICE ----------------
 def fetch_price(sec_id=None):
@@ -150,61 +163,63 @@ def check_dhan_api_status():
             DHAN_API_STATUS["state"] = "ACTIVE"
             DHAN_API_STATUS["message"] = "Active"
         else:
-            err = str(resp).lower()
-            if "dh-901" in err or "invalid_authentication" in err:
-                DHAN_API_STATUS["state"] = "EXPIRED"
-                DHAN_API_STATUS["message"] = "Token Expired"
-            else:
-                DHAN_API_STATUS["state"] = "ERROR"
-                DHAN_API_STATUS["message"] = "API Error"
+            DHAN_API_STATUS["state"] = "ERROR"
+            DHAN_API_STATUS["message"] = "API Error"
     except Exception:
         DHAN_API_STATUS["state"] = "ERROR"
         DHAN_API_STATUS["message"] = "API Error"
 
-# ---------------- FORCED EXIT ----------------
-def detect_forced_exit():
+# ---------------- EXIT OPPOSITE POSITION (NEW LOGIC) ----------------
+def exit_opposite_position(expected_type):
+    """
+    Ensures any opposite position is closed BEFORE entering a new one.
+    Returns True if safe to proceed, False if exit failed.
+    """
     global OPEN_TRADE_REF
-    if not OPEN_TRADE_REF:
-        return
-    try:
-        pos = dhan.get_positions()
-        if pos.get("status") != "success":
-            return
-        bn_open = any(
-            "BANKNIFTY" in p["tradingSymbol"] and int(p["netQty"]) != 0
-            for p in pos["data"]
-        )
-        if not bn_open:
-            OPEN_TRADE_REF["exit_price"] = fetch_price()
-            OPEN_TRADE_REF["status"] = "CLOSED"
-            OPEN_TRADE_REF["remarks"] = "FORCED EXIT"
-            OPEN_TRADE_REF = None
-    except Exception:
-        pass
 
-# ---------------- TRADE ACTIVE DAYS ----------------
-def trade_active_days(trade):
+    if not OPEN_TRADE_REF or OPEN_TRADE_REF["type"] == expected_type:
+        return True  # Nothing to exit
+
+    log_now("Opposite position detected, attempting exit first")
+
     try:
-        if trade.get("status") == "REJECTED" or trade.get("entry_price") in ["—", None]:
-            return "—"
-        start = datetime.strptime(trade["date"], "%d-%b-%Y").date()
-        end = date.today()
-        return (end - start).days + 1
-    except Exception:
-        return "—"
+        # Exit by selling existing position at market
+        dhan.place_order(
+            security_id=OPEN_TRADE_REF["security_id"],
+            exchange_segment=dhan.NSE_FNO,
+            transaction_type=dhan.SELL,
+            quantity=OPEN_TRADE_REF["lot_size"],
+            order_type=dhan.MARKET,
+            product_type=dhan.MARGIN,
+            price=0
+        )
+
+        time.sleep(1)  # Ensure exit happens before new entry
+
+        OPEN_TRADE_REF["exit_price"] = fetch_price(OPEN_TRADE_REF["security_id"])
+        OPEN_TRADE_REF["status"] = "CLOSED"
+        OPEN_TRADE_REF["remarks"] = "EXIT ON REVERSAL"
+
+        OPEN_TRADE_REF = None
+        return True
+
+    except Exception as e:
+        log_now(f"Exit failed: {e}")
+        return False
 
 # ---------------- ROUTES ----------------
 @app.route("/")
 def dashboard():
     check_dhan_api_status()
-    detect_forced_exit()
+    token_info = get_token_expiry_status()
     expiry, dte = get_active_expiry_details()
+
     return render_template_string(
         DASHBOARD_HTML,
         history=TRADE_HISTORY,
-        trade_active_days=trade_active_days,
         api_state=DHAN_API_STATUS["state"],
         api_message=DHAN_API_STATUS["message"],
+        token=token_info,
         active_expiry=expiry,
         expiry_danger=(dte is not None and dte <= 5),
         last_run=datetime.now(IST).strftime("%H:%M:%S")
@@ -213,12 +228,18 @@ def dashboard():
 @app.route("/mlfusion", methods=["POST"])
 def mlfusion():
     global OPEN_TRADE_REF
+
     data = request.get_json(force=True)
     msg = data.get("message", "").upper()
     price = float(data.get("price", 0))
 
     log_now(f"MLFUSION ALERT | {msg} @ {price}")
-    detect_forced_exit()
+
+    expected_type = "CE" if "BUY" in msg else "PE"
+
+    # NEW LOGIC: exit opposite position before entry
+    if not exit_opposite_position(expected_type):
+        return jsonify({"error": "Exit failed, trade blocked"}), 400
 
     sec, strike, qty, expiry_used = get_atm_id(price, msg)
     if not sec:
@@ -241,20 +262,18 @@ def mlfusion():
         "time": datetime.now(IST).strftime("%H:%M:%S"),
         "price": price,
         "strike": strike,
-        "type": "CE" if "BUY" in msg else "PE",
+        "type": expected_type,
         "expiry_used": expiry_used,
         "lot_size": qty,
-        "premium_paid": "—",
         "entry_price": "—",
         "exit_price": "—",
         "status": "OPEN" if success else "REJECTED",
-        "remarks": str(resp)
+        "remarks": str(resp),
+        "security_id": sec
     }
 
     if success:
-        entry = fetch_price(sec)
-        trade["entry_price"] = entry
-        trade["premium_paid"] = round(entry * qty, 2) if entry else "—"
+        trade["entry_price"] = fetch_price(sec)
         OPEN_TRADE_REF = trade
 
     TRADE_HISTORY.insert(0, trade)
@@ -267,78 +286,24 @@ DASHBOARD_HTML = '''
 <head>
 <meta http-equiv="refresh" content="60">
 <style>
-body{font-family:sans-serif;background:#f0f2f5;padding:20px}
-.status-bar{background:#fff;padding:15px;border-radius:8px;display:flex;gap:20px;align-items:center}
-.status-active{background:#28a745;color:#fff;padding:2px 10px;border-radius:10px}
-.status-expired{background:#d9534f;color:#fff;padding:2px 10px;border-radius:10px}
-.status-error{background:#f0ad4e;color:#fff;padding:2px 10px;border-radius:10px}
-.expiry-danger{color:#d9534f;font-weight:bold}
-
-.journal-title{
-    font-family:"Georgia","Times New Roman",serif;
-    font-size:21px;
-    font-weight:500;
-    color:#b08d57;
-    letter-spacing:0.6px;
-}
-
-table{width:100%;border-collapse:collapse;background:#fff;margin-top:20px}
-th{background:#333;color:#fff;padding:10px}
-td{padding:10px;border-bottom:1px solid #eee}
+.status-active{background:#28a745;color:#fff;padding:2px 8px;border-radius:8px}
+.status-soon{background:#f0ad4e;color:#fff;padding:2px 8px;border-radius:8px}
+.status-expired{background:#d9534f;color:#fff;padding:2px 8px;border-radius:8px}
 </style>
 </head>
 <body>
 
-<div class="status-bar">
-    <div>
-        <b>Dhan API:</b>
-        <span class="{% if api_state=='ACTIVE' %}status-active{% elif api_state=='EXPIRED' %}status-expired{% else %}status-error{% endif %}">
-            {{ api_message }}
-        </span>
-        &nbsp;&nbsp;
-        <b>Active BN Expiry:</b>
-        <span class="{{ 'expiry-danger' if expiry_danger else '' }}">{{ active_expiry }}</span>
-    </div>
+<b>Dhan API:</b> {{ api_message }}
+&nbsp;&nbsp;
+<b>Token:</b>
+<span class="
+{% if token.state=='ACTIVE' %}status-active
+{% elif token.state=='SOON' %}status-soon
+{% else %}status-expired{% endif %}
+">
+{{ token.label }}
+</span>
 
-    <div class="journal-title" style="margin:0 auto;">
-        Ramu’s Magic Journal
-    </div>
-
-    <div>
-        Last Check: {{ last_run }} IST
-    </div>
-</div>
-
-<table>
-<tr>
-<th>Date</th><th>Time</th><th>Price</th><th>Strike</th><th>Type</th><th>Expiry Used</th>
-<th>Lot</th><th>Premium</th><th>Entry</th><th>Exit</th>
-<th>Points Captured</th><th>PnL</th><th>Trade Active Days</th>
-<th>Status</th><th>Remarks</th>
-</tr>
-
-{% for t in history %}
-<tr>
-<td>{{t.date}}</td><td>{{t.time}}</td><td>{{t.price}}</td><td>{{t.strike}}</td><td>{{t.type}}</td>
-<td>{{t.expiry_used}}</td><td>{{t.lot_size}}</td><td>{{t.premium_paid}}</td>
-<td>{{t.entry_price}}</td><td>{{t.exit_price}}</td>
-
-{% if t.entry_price != '—' and t.exit_price != '—' %}
-{% set pts = t.exit_price - t.entry_price %}
-<td>{{ pts }}</td>
-<td style="background-color:
-{{ 'lightgreen' if pts * t.lot_size > 0 else 'lightcoral' if pts * t.lot_size < 0 else 'lightyellow' }}">
-₹{{ pts * t.lot_size }}
-</td>
-{% else %}
-<td>—</td><td style="background-color:lightyellow">—</td>
-{% endif %}
-
-<td>{{ trade_active_days(t) }}</td>
-<td>{{t.status}}</td><td>{{t.remarks}}</td>
-</tr>
-{% endfor %}
-</table>
 </body>
 </html>
 '''
