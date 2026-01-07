@@ -18,22 +18,6 @@ dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 IST = pytz.timezone("Asia/Kolkata")
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
 
-# ---------------- TOKEN STATUS (BROKER TRUTH + TOOLTIP) ----------------
-def get_token_status():
-    try:
-        dhan.get_funds()
-        return {
-            "state": "ACTIVE",
-            "label": "Active (Broker Verified)",
-            "tooltip": "Token validated live using Dhan API"
-        }
-    except Exception as e:
-        return {
-            "state": "EXPIRED",
-            "label": "Expired – Renew Token",
-            "tooltip": str(e)
-        }
-
 # ---------------- GLOBALS ----------------
 SCRIP_MASTER_DATA = None
 BN_EXPIRIES = []
