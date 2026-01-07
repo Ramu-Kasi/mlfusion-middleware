@@ -4,7 +4,7 @@ import time
 import pandas as pd
 from flask import Flask, request, jsonify, render_template_string
 from dhanhq import dhanhq
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 import pytz
 import threading
 
@@ -149,7 +149,7 @@ def check_dhan_api_status():
         DHAN_API_STATUS["state"] = "ERROR"
         DHAN_API_STATUS["message"] = "API Error"
 
-# ---------------- EXIT BEFORE ENTRY (NEW) ----------------
+# ---------------- EXIT BEFORE ENTRY ----------------
 def exit_opposite(expected_type):
     global OPEN_TRADE_REF
 
@@ -172,7 +172,7 @@ def exit_opposite(expected_type):
             price=0
         )
 
-        time.sleep(1)  # STRICT sequencing safety
+        time.sleep(1)
 
         OPEN_TRADE_REF["exit_price"] = fetch_price()
         OPEN_TRADE_REF["status"] = "CLOSED"
