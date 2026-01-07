@@ -4,7 +4,7 @@ import time
 import pandas as pd
 from flask import Flask, request, jsonify, render_template_string
 from dhanhq import dhanhq
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 import pytz
 import threading
 
@@ -126,7 +126,7 @@ def fetch_price(sec_id=None):
         pass
     return None
 
-# ---------------- BROKER TRUTH CHECK ----------------
+# ---------------- BROKER CHECK ----------------
 def broker_has_open_position(security_id):
     try:
         resp = dhan.get_positions()
@@ -200,7 +200,6 @@ def check_dhan_api_status():
 def dashboard():
     check_dhan_api_status()
     expiry, dte = get_active_expiry_details()
-    token = get_token_status()
 
     return render_template_string(
         DASHBOARD_HTML,
@@ -208,7 +207,6 @@ def dashboard():
         trade_active_days=trade_active_days,
         api_state=DHAN_API_STATUS["state"],
         api_message=DHAN_API_STATUS["message"],
-        token=token,
         active_expiry=expiry,
         expiry_danger=(dte is not None and dte <= 5),
         last_run=datetime.now(IST).strftime("%H:%M:%S")
@@ -290,12 +288,6 @@ td{padding:10px;border-bottom:1px solid #eee}
 <div class="status-bar">
 <b>Dhan API:</b>
 <span class="{% if api_state=='ACTIVE' %}status-active{% else %}status-expired{% endif %}">{{ api_message }}</span>
-<b>Token:</b>
-<span
- title="{{ token.tooltip }}"
- class="{% if token.state=='ACTIVE' %}status-active{% else %}status-expired{% endif %}">
- {{ token.label }}
-</span>
 <b>Active BN Expiry:</b>
 <span class="{{ 'expiry-danger' if expiry_danger else '' }}">{{ active_expiry }}</span>
 <div class="journal-title" style="margin-left:auto">Ramu’s Magic Journal</div>
