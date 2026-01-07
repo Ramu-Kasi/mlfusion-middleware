@@ -18,25 +18,6 @@ dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 IST = pytz.timezone("Asia/Kolkata")
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
 
-# ---------------- TOKEN TIMER (NEW) ----------------
-TOKEN_VALIDITY_HOURS = 24
-TOKEN_GENERATED_AT = datetime.now(IST)
-
-def get_token_status():
-    expiry = TOKEN_GENERATED_AT + timedelta(hours=TOKEN_VALIDITY_HOURS)
-    remaining = expiry - datetime.now(IST)
-
-    if remaining.total_seconds() <= 0:
-        return {"state": "EXPIRED", "label": "Expired"}
-    elif remaining.total_seconds() <= 2 * 3600:
-        h = remaining.seconds // 3600
-        m = (remaining.seconds % 3600) // 60
-        return {"state": "SOON", "label": f"Expiring Soon ({h}h {m}m)"}
-    else:
-        h = remaining.seconds // 3600
-        m = (remaining.seconds % 3600) // 60
-        return {"state": "ACTIVE", "label": f"Expires in {h}h {m}m"}
-
 # ---------------- GLOBALS ----------------
 SCRIP_MASTER_DATA = None
 BN_EXPIRIES = []
@@ -218,7 +199,6 @@ def trade_active_days(trade):
 def dashboard():
     check_dhan_api_status()
     expiry, dte = get_active_expiry_details()
-    token = get_token_status()
 
     return render_template_string(
         DASHBOARD_HTML,
@@ -226,7 +206,6 @@ def dashboard():
         trade_active_days=trade_active_days,
         api_state=DHAN_API_STATUS["state"],
         api_message=DHAN_API_STATUS["message"],
-        token=token,
         active_expiry=expiry,
         expiry_danger=(dte is not None and dte <= 5),
         last_run=datetime.now(IST).strftime("%H:%M:%S")
@@ -299,7 +278,6 @@ body{font-family:sans-serif;background:#f0f2f5;padding:20px}
 .status-bar{background:#fff;padding:15px;border-radius:8px;display:flex;gap:20px;align-items:center}
 .status-active{background:#28a745;color:#fff;padding:2px 10px;border-radius:10px}
 .status-expired{background:#d9534f;color:#fff;padding:2px 10px;border-radius:10px}
-.status-soon{background:#f0ad4e;color:#fff;padding:2px 10px;border-radius:10px}
 .expiry-danger{color:#d9534f;font-weight:bold}
 .journal-title{font-family:Georgia,serif;font-size:21px;color:#b08d57}
 table{width:100%;border-collapse:collapse;background:#fff;margin-top:20px}
@@ -313,15 +291,6 @@ td{padding:10px;border-bottom:1px solid #eee}
 <b>Dhan API:</b>
 <span class="{% if api_state=='ACTIVE' %}status-active{% else %}status-expired{% endif %}">
 {{ api_message }}
-</span>
-
-&nbsp;&nbsp;<b>Token:</b>
-<span class="
-{% if token.state=='ACTIVE' %}status-active
-{% elif token.state=='SOON' %}status-soon
-{% else %}status-expired{% endif %}
-">
-{{ token.label }}
 </span>
 
 &nbsp;&nbsp;<b>Active BN Expiry:</b>
