@@ -192,7 +192,6 @@ def atomic_switch(expected_type):
 
     actual = get_actual_bn_positions()
 
-    # No BN position → allow
     if not actual:
         OPEN_TRADE_REF = None
         return "ALLOW"
@@ -201,12 +200,10 @@ def atomic_switch(expected_type):
     opposite = "PE" if expected_type == "CE" else "CE"
     opp_pos = next((p for p in actual if p["type"] == opposite), None)
 
-    # Same direction already open → BLOCK
     if same_type and not opp_pos:
         log_now(f"■ SAME DIRECTION {expected_type} already open → BLOCK")
         return "BLOCK"
 
-    # Opposite exists → must flip
     if opp_pos:
         log_now(f"↺ REVERSAL: Closing {opposite} before {expected_type}")
 
@@ -221,11 +218,9 @@ def atomic_switch(expected_type):
         )
 
         if r.get("status") != "success":
-            log_now("✗ EXIT FAILED")
             return "ABORT"
 
         if not verify_position_closed(opp_pos["security_id"]):
-            log_now("✗ EXIT NOT VERIFIED")
             return "ABORT"
 
         OPEN_TRADE_REF = None
@@ -239,7 +234,8 @@ def atomic_switch(expected_type):
 def dashboard():
     check_dhan_api_status()
     expiry, dte = get_active_expiry_details()
-    return render_template_string(DASHBOARD_HTML,
+    return render_template_string(
+        DASHBOARD_HTML,
         history=TRADE_HISTORY,
         api_state=DHAN_API_STATUS["state"],
         api_message=DHAN_API_STATUS["message"],
@@ -306,8 +302,67 @@ def mlfusion():
     TRADE_HISTORY.insert(0, trade)
     return jsonify(trade), 200
 
-# ================= UI =================
-DASHBOARD_HTML = """(unchanged – exactly same as your current dashboard HTML)"""
+# ================= DASHBOARD HTML =================
+DASHBOARD_HTML = '''
+<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="refresh" content="60">
+<style>
+body{font-family:sans-serif;background:#f0f2f5;padding:20px}
+.status-bar{background:#fff;padding:15px;border-radius:8px;display:flex;gap:20px;align-items:center}
+.status-active{background:#28a745;color:#fff;padding:2px 10px;border-radius:10px}
+.status-expired{background:#d9534f;color:#fff;padding:2px 10px;border-radius:10px}
+.expiry-danger{color:#d9534f;font-weight:bold}
+.journal-title{font-family:Georgia,serif;font-size:21px;color:#b08d57}
+table{width:100%;border-collapse:collapse;background:#fff;margin-top:20px}
+th{background:#333;color:#fff;padding:10px}
+td{padding:10px;border-bottom:1px solid #eee}
+</style>
+</head>
+<body>
+
+<div class="status-bar">
+<b>Dhan API:</b>
+<span class="{% if api_state=='ACTIVE' %}status-active{% else %}status-expired{% endif %}">
+{{ api_message }}
+</span>
+
+&nbsp;&nbsp;<b>Active BN Expiry:</b>
+<span class="{{ 'expiry-danger' if expiry_danger else '' }}">{{ active_expiry }}</span>
+
+<div class="journal-title" style="margin:0 auto;">Ramu's Magic Journal</div>
+<div>Last Check: {{ last_run }} IST</div>
+</div>
+
+<table>
+<tr>
+<th>Date</th><th>Time</th><th>Price</th><th>Strike</th><th>Type</th><th>Expiry</th>
+<th>Lot</th><th>Premium</th><th>Entry</th><th>Exit</th>
+<th>Status</th><th>Remarks</th>
+</tr>
+
+{% for t in history %}
+<tr>
+<td>{{t.date}}</td>
+<td>{{t.time}}</td>
+<td>{{t.price}}</td>
+<td>{{t.strike}}</td>
+<td>{{t.type}}</td>
+<td>{{t.expiry_used}}</td>
+<td>{{t.lot_size}}</td>
+<td>{{t.premium_paid}}</td>
+<td>{{t.entry_price}}</td>
+<td>{{t.exit_price}}</td>
+<td>{{t.status}}</td>
+<td>{{t.remarks}}</td>
+</tr>
+{% endfor %}
+</table>
+
+</body>
+</html>
+'''
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
