@@ -33,13 +33,16 @@ def log_now(msg):
 
 # ================= SCRIP MASTER =================
 def load_scrip_master():
-    global SCRIP_MASTER_DATA
+    global SCRIP_MASTER_DATA, BN_EXPIRIES
     try:
         df = pd.read_csv(SCRIP_URL, low_memory=False)
 
         inst = next(c for c in df.columns if "INSTRUMENT" in c.upper())
         sym  = next(c for c in df.columns if "SYMBOL" in c.upper())
-        exp  = next(c for c in df.columns if "EXPIRY" in c.upper())
+        exp  = next(
+            c for c in df.columns
+            if "EXPIRY_DATE" in c.upper() or "EXPIRY" in c.upper()
+        )
 
         mask = (
             df[inst].str.contains("OPTIDX", na=False) &
@@ -48,11 +51,14 @@ def load_scrip_master():
         )
 
         SCRIP_MASTER_DATA = df[mask].copy()
-        SCRIP_MASTER_DATA[exp] = pd.to_datetime(SCRIP_MASTER_DATA[exp], errors="coerce")
+        SCRIP_MASTER_DATA[exp] = pd.to_datetime(
+            SCRIP_MASTER_DATA[exp], errors="coerce"
+        )
         SCRIP_MASTER_DATA.dropna(subset=[exp], inplace=True)
 
-        refresh_bn_expiries()
-        log_now("✓ Scrip master loaded")
+        BN_EXPIRIES = sorted(SCRIP_MASTER_DATA[exp].unique())
+
+        log_now(f"✓ Scrip master loaded | BN Expiries: {len(BN_EXPIRIES)}")
 
     except Exception as e:
         log_now(f"✗ Scrip load error: {e}")
@@ -62,15 +68,11 @@ def periodic_scrip_refresh():
         time.sleep(24 * 60 * 60)
         load_scrip_master()
 
-threading.Thread(target=load_scrip_master, daemon=True).start()
+# Load immediately + keep refreshing
+load_scrip_master()
 threading.Thread(target=periodic_scrip_refresh, daemon=True).start()
 
 # ================= EXPIRY =================
-def refresh_bn_expiries():
-    global BN_EXPIRIES
-    exp = next(c for c in SCRIP_MASTER_DATA.columns if "EXPIRY" in c.upper())
-    BN_EXPIRIES = sorted(SCRIP_MASTER_DATA[exp].unique())
-
 def get_current_and_next_expiry():
     today = date.today()
     future = [e for e in BN_EXPIRIES if e.date() >= today]
@@ -205,8 +207,6 @@ def atomic_switch(expected_type):
         return "BLOCK"
 
     if opp_pos:
-        log_now(f"↺ REVERSAL: Closing {opposite} before {expected_type}")
-
         r = dhan.place_order(
             security_id=opp_pos["security_id"],
             exchange_segment=dhan.NSE_FNO,
@@ -253,12 +253,10 @@ def mlfusion():
     price = float(data.get("price", 0))
 
     expected_type = "CE" if "BUY" in msg else "PE"
-
     decision = atomic_switch(expected_type)
 
     if decision == "BLOCK":
-        return jsonify({"status": "ignored", "reason": "same direction already open"}), 200
-
+        return jsonify({"status": "ignored"}), 200
     if decision == "ABORT":
         return jsonify({"error": "Atomic switch failed"}), 400
 
@@ -337,25 +335,17 @@ td{padding:10px;border-bottom:1px solid #eee}
 
 <table>
 <tr>
-<th>Date</th><th>Time</th><th>Price</th><th>Strike</th><th>Type</th><th>Expiry</th>
-<th>Lot</th><th>Premium</th><th>Entry</th><th>Exit</th>
+<th>Date</th><th>Time</th><th>Price</th><th>Strike</th><th>Type</th>
+<th>Expiry</th><th>Lot</th><th>Premium</th><th>Entry</th><th>Exit</th>
 <th>Status</th><th>Remarks</th>
 </tr>
 
 {% for t in history %}
 <tr>
-<td>{{t.date}}</td>
-<td>{{t.time}}</td>
-<td>{{t.price}}</td>
-<td>{{t.strike}}</td>
-<td>{{t.type}}</td>
-<td>{{t.expiry_used}}</td>
-<td>{{t.lot_size}}</td>
-<td>{{t.premium_paid}}</td>
-<td>{{t.entry_price}}</td>
-<td>{{t.exit_price}}</td>
-<td>{{t.status}}</td>
-<td>{{t.remarks}}</td>
+<td>{{t.date}}</td><td>{{t.time}}</td><td>{{t.price}}</td><td>{{t.strike}}</td>
+<td>{{t.type}}</td><td>{{t.expiry_used}}</td><td>{{t.lot_size}}</td>
+<td>{{t.premium_paid}}</td><td>{{t.entry_price}}</td><td>{{t.exit_price}}</td>
+<td>{{t.status}}</td><td>{{t.remarks}}</td>
 </tr>
 {% endfor %}
 </table>
