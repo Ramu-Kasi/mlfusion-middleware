@@ -149,39 +149,108 @@ def check_dhan_api_status():
         DHAN_API_STATUS["state"] = "ERROR"
         DHAN_API_STATUS["message"] = "API Error"
 
-# ---------------- EXIT BEFORE ENTRY ----------------
+# ---------------- VERIFY POSITION CLOSED ----------------
+def verify_position_closed(security_id, max_retries=2):
+    """
+    Fast position verification - max 2 attempts with minimal delay.
+    Returns True if position is confirmed closed or not found.
+    """
+    for attempt in range(max_retries):
+        try:
+            time.sleep(0.15)  # Ultra-fast 150ms delay
+            resp = dhan.get_positions()
+            if resp.get("status") != "success":
+                log_now(f"Check {attempt+1}: API error")
+                continue
+            
+            # Check if security_id exists in open positions
+            positions = resp.get("data", [])
+            for pos in positions:
+                if str(pos.get("securityId")) == str(security_id):
+                    net_qty = pos.get("netQty", 0)
+                    if net_qty != 0:
+                        log_now(f"Check {attempt+1}: Still open (qty={net_qty})")
+                        return False
+            
+            log_now(f"✓ Verified closed (attempt {attempt+1})")
+            return True
+            
+        except Exception as e:
+            log_now(f"Verify error {attempt+1}: {e}")
+    
+    # If we can't verify after 2 attempts, assume it failed
+    log_now("⚠ Could not verify closure")
+    return False
+
+# ---------------- EXIT OPPOSITE (FIXED ATOMIC SWITCH) ----------------
 def exit_opposite(expected_type):
+    """
+    CRITICAL FIX: Exit opposite trade type before entering new trade.
+    - If expected_type is CE, close any open PE trade
+    - If expected_type is PE, close any open CE trade
+    - Returns True only when safe to proceed with new trade
+    """
     global OPEN_TRADE_REF
 
+    # No open trade - safe to proceed
     if not OPEN_TRADE_REF:
+        log_now("✓ No open trade found, safe to proceed")
         return True
 
+    # Same type trade already open - safe to proceed
     if OPEN_TRADE_REF["type"] == expected_type:
+        log_now(f"✓ Open trade is same type ({expected_type}), safe to proceed")
         return True
 
-    log_now("Reversal detected → exiting open trade FIRST")
+    # OPPOSITE trade detected - MUST CLOSE IT FIRST
+    log_now(f"⚠ REVERSAL: Open {OPEN_TRADE_REF['type']} detected, new signal is {expected_type}")
+    log_now(f"→ ATOMIC SWITCH: Closing {OPEN_TRADE_REF['type']} trade first...")
+
+    security_id = OPEN_TRADE_REF["security_id"]
+    lot_size = OPEN_TRADE_REF["lot_size"]
 
     try:
-        dhan.place_order(
-            security_id=OPEN_TRADE_REF["security_id"],
+        # Place exit order
+        exit_resp = dhan.place_order(
+            security_id=security_id,
             exchange_segment=dhan.NSE_FNO,
             transaction_type=dhan.SELL,
-            quantity=OPEN_TRADE_REF["lot_size"],
+            quantity=lot_size,
             order_type=dhan.MARKET,
             product_type=dhan.MARGIN,
             price=0
         )
 
-        time.sleep(1)
+        log_now(f"Exit order response: {exit_resp}")
 
-        OPEN_TRADE_REF["exit_price"] = fetch_price()
+        # Check if order was placed successfully
+        if exit_resp.get("status") != "success":
+            log_now(f"✗ EXIT FAILED: {exit_resp.get('remarks', 'Unknown error')}")
+            return False
+
+        # Verify position is actually closed
+        if not verify_position_closed(security_id):
+            log_now("✗ EXIT FAILED: Position still open after exit order")
+            return False
+
+        # Update trade record
+        exit_price = fetch_price(security_id)
+        OPEN_TRADE_REF["exit_price"] = exit_price if exit_price else "—"
         OPEN_TRADE_REF["status"] = "CLOSED"
         OPEN_TRADE_REF["remarks"] = "EXIT ON REVERSAL"
+        
+        log_now(f"✓ {OPEN_TRADE_REF['type']} closed @ {exit_price}")
+        
+        # Clear the reference
         OPEN_TRADE_REF = None
+        
+        # Minimal delay for state propagation
+        time.sleep(0.1)
+        
         return True
 
     except Exception as e:
-        log_now(f"Exit failed: {e}")
+        log_now(f"✗ EXIT EXCEPTION: {e}")
         return False
 
 # ---------------- TRADE ACTIVE DAYS ----------------
@@ -219,17 +288,26 @@ def mlfusion():
     msg = data.get("message", "").upper()
     price = float(data.get("price", 0))
 
-    log_now(f"MLFUSION | {msg} @ {price}")
+    log_now(f"═══ MLFUSION SIGNAL ═══")
+    log_now(f"Signal: {msg} @ ₹{price}")
 
     expected_type = "CE" if "BUY" in msg else "PE"
+    log_now(f"Expected trade type: {expected_type}")
 
+    # CRITICAL: Exit opposite trade FIRST (atomic switch)
     if not exit_opposite(expected_type):
-        return jsonify({"error": "Exit failed"}), 400
+        log_now("✗ TRADE REJECTED: Failed to exit opposite position")
+        return jsonify({"error": "Failed to exit opposite position - trade aborted"}), 400
 
+    # Get ATM details for new trade
     sec, strike, qty, expiry_used = get_atm_id(price, msg)
     if not sec:
+        log_now("✗ TRADE REJECTED: ATM strike not found")
         return jsonify({"error": "ATM not found"}), 400
 
+    log_now(f"→ Entering {expected_type} @ Strike {strike}, Qty {qty}")
+
+    # Place new order
     resp = dhan.place_order(
         security_id=sec,
         exchange_segment=dhan.NSE_FNO,
@@ -241,7 +319,13 @@ def mlfusion():
     )
 
     success = resp.get("status") == "success"
+    
+    if success:
+        log_now(f"✓ {expected_type} order placed successfully")
+    else:
+        log_now(f"✗ {expected_type} order FAILED: {resp}")
 
+    # Create trade record
     trade = {
         "date": datetime.now(IST).strftime("%d-%b-%Y"),
         "time": datetime.now(IST).strftime("%H:%M:%S"),
@@ -259,12 +343,17 @@ def mlfusion():
     }
 
     if success:
+        # Minimal delay for execution confirmation
+        time.sleep(0.3)
         entry = fetch_price(sec)
         trade["entry_price"] = entry
         trade["premium_paid"] = round(entry * qty, 2) if entry else "—"
         OPEN_TRADE_REF = trade
+        log_now(f"Entry: ₹{entry}, Premium: ₹{trade['premium_paid']}")
 
     TRADE_HISTORY.insert(0, trade)
+    log_now("═══════════════════════")
+    
     return jsonify(trade), 200
 
 # ---------------- UI ----------------
@@ -296,7 +385,7 @@ td{padding:10px;border-bottom:1px solid #eee}
 &nbsp;&nbsp;<b>Active BN Expiry:</b>
 <span class="{{ 'expiry-danger' if expiry_danger else '' }}">{{ active_expiry }}</span>
 
-<div class="journal-title" style="margin:0 auto;">Ramu’s Magic Journal</div>
+<div class="journal-title" style="margin:0 auto;">Ramu's Magic Journal</div>
 <div>Last Check: {{ last_run }} IST</div>
 </div>
 
