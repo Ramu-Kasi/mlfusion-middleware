@@ -182,32 +182,100 @@ def verify_position_closed(security_id, max_retries=2):
     log_now("⚠ Could not verify closure")
     return False
 
+# ---------------- CHECK ACTUAL BN POSITIONS ----------------
+def get_actual_bn_positions():
+    """
+    Query Dhan API for actual open BankNifty option positions.
+    Returns list of positions with type (CE/PE), security_id, and quantity.
+    """
+    try:
+        resp = dhan.get_positions()
+        if resp.get("status") != "success":
+            log_now("⚠ Could not fetch positions from Dhan API")
+            return []
+        
+        bn_positions = []
+        positions = resp.get("data", [])
+        
+        for pos in positions:
+            net_qty = pos.get("netQty", 0)
+            if net_qty == 0:
+                continue  # Skip closed positions
+            
+            # Check if it's a BankNifty option
+            trading_symbol = pos.get("tradingSymbol", "")
+            if "BANKNIFTY" not in trading_symbol.upper():
+                continue
+            if "BANKEX" in trading_symbol.upper():
+                continue  # Skip BankEx
+            
+            # Determine CE or PE
+            option_type = None
+            if "CE" in trading_symbol:
+                option_type = "CE"
+            elif "PE" in trading_symbol:
+                option_type = "PE"
+            
+            if option_type:
+                bn_positions.append({
+                    "type": option_type,
+                    "security_id": str(pos.get("securityId")),
+                    "quantity": abs(net_qty),
+                    "symbol": trading_symbol
+                })
+        
+        return bn_positions
+        
+    except Exception as e:
+        log_now(f"⚠ Error fetching BN positions: {e}")
+        return []
+
 # ---------------- EXIT OPPOSITE (FIXED ATOMIC SWITCH) ----------------
 def exit_opposite(expected_type):
     """
-    CRITICAL FIX: Exit opposite trade type before entering new trade.
+    CRITICAL FIX: Exit opposite BankNifty trade type before entering new trade.
+    - Checks ACTUAL Dhan positions (not just OPEN_TRADE_REF)
+    - Handles manual trades and force-closed positions
     - If expected_type is CE, close any open PE trade
     - If expected_type is PE, close any open CE trade
     - Returns True only when safe to proceed with new trade
     """
     global OPEN_TRADE_REF
 
-    # No open trade - safe to proceed
-    if not OPEN_TRADE_REF:
-        log_now("✓ No open trade found, safe to proceed")
+    # Step 1: Check actual BN positions from Dhan API
+    log_now("→ Checking actual BankNifty positions...")
+    actual_positions = get_actual_bn_positions()
+    
+    if not actual_positions:
+        log_now("✓ No open BN positions, safe to proceed")
+        OPEN_TRADE_REF = None  # Sync state
         return True
-
-    # Same type trade already open - safe to proceed
-    if OPEN_TRADE_REF["type"] == expected_type:
-        log_now(f"✓ Open trade is same type ({expected_type}), safe to proceed")
+    
+    # Step 2: Find opposite type position
+    opposite_type = "PE" if expected_type == "CE" else "CE"
+    opposite_position = None
+    
+    for pos in actual_positions:
+        if pos["type"] == opposite_type:
+            opposite_position = pos
+            break
+    
+    # Step 3: Check if same type already open (no action needed)
+    same_type_open = any(pos["type"] == expected_type for pos in actual_positions)
+    
+    if not opposite_position:
+        if same_type_open:
+            log_now(f"✓ {expected_type} already open, no opposite found")
+        else:
+            log_now(f"✓ No opposite {opposite_type} position found")
         return True
+    
+    # Step 4: OPPOSITE DETECTED - MUST CLOSE IT
+    log_now(f"⚠ REVERSAL: Open {opposite_type} detected, new signal is {expected_type}")
+    log_now(f"→ ATOMIC SWITCH: Closing {opposite_type} ({opposite_position['symbol']})...")
 
-    # OPPOSITE trade detected - MUST CLOSE IT FIRST
-    log_now(f"⚠ REVERSAL: Open {OPEN_TRADE_REF['type']} detected, new signal is {expected_type}")
-    log_now(f"→ ATOMIC SWITCH: Closing {OPEN_TRADE_REF['type']} trade first...")
-
-    security_id = OPEN_TRADE_REF["security_id"]
-    lot_size = OPEN_TRADE_REF["lot_size"]
+    security_id = opposite_position["security_id"]
+    lot_size = opposite_position["quantity"]
 
     try:
         # Place exit order
@@ -233,13 +301,15 @@ def exit_opposite(expected_type):
             log_now("✗ EXIT FAILED: Position still open after exit order")
             return False
 
-        # Update trade record
-        exit_price = fetch_price(security_id)
-        OPEN_TRADE_REF["exit_price"] = exit_price if exit_price else "—"
-        OPEN_TRADE_REF["status"] = "CLOSED"
-        OPEN_TRADE_REF["remarks"] = "EXIT ON REVERSAL"
-        
-        log_now(f"✓ {OPEN_TRADE_REF['type']} closed @ {exit_price}")
+        # Update trade record if it was tracked
+        if OPEN_TRADE_REF and OPEN_TRADE_REF.get("security_id") == security_id:
+            exit_price = fetch_price(security_id)
+            OPEN_TRADE_REF["exit_price"] = exit_price if exit_price else "—"
+            OPEN_TRADE_REF["status"] = "CLOSED"
+            OPEN_TRADE_REF["remarks"] = "EXIT ON REVERSAL"
+            log_now(f"✓ {opposite_type} closed @ {exit_price}")
+        else:
+            log_now(f"✓ {opposite_type} (manual) closed successfully")
         
         # Clear the reference
         OPEN_TRADE_REF = None
